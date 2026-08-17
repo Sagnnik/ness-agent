@@ -12,9 +12,13 @@ export interface SeoProps {
   publishedTime?: string
 }
 
-function absoluteUrl(pathOrUrl: string) {
+function absoluteUrl(pathOrUrl: string, trailingSlash = false) {
   try {
-    return new URL(pathOrUrl, SITE_URL).toString()
+    const url = new URL(pathOrUrl, SITE_URL)
+    if (trailingSlash && pathOrUrl.startsWith('/') && url.pathname !== '/') {
+      url.pathname = `${url.pathname.replace(/\/+$/, '')}/`
+    }
+    return url.toString()
   } catch {
     return pathOrUrl
   }
@@ -55,7 +59,7 @@ export function Seo({
   publishedTime,
 }: SeoProps) {
   useEffect(() => {
-    const url = absoluteUrl(path)
+    const url = absoluteUrl(path, true)
     const imageUrl = image ? absoluteUrl(image) : ''
 
     document.title = title

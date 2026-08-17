@@ -179,7 +179,8 @@ function renderHtml(template, metadata) {
 }
 
 function urlFor(pathname) {
-  return new URL(pathname, SITE_URL).toString()
+  const normalizedPath = pathname === '/' ? '/' : `${pathname.replace(/\/+$/, '')}/`
+  return new URL(normalizedPath, SITE_URL).toString()
 }
 
 function makeMetadata({ pathname, title, description, type = 'website', date, image }) {
