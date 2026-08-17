@@ -13,6 +13,7 @@ class UsageEvent:
     output_tokens: int
     cost_usd: float | None
     calls: int = 1
+    cache_write_input_tokens: int = 0
 
 
 def aggregate_usage(events: list[UsageEvent]) -> UsageEvent | None:
@@ -33,6 +34,7 @@ def aggregate_usage(events: list[UsageEvent]) -> UsageEvent | None:
         output_tokens=sum(e.output_tokens for e in events),
         cost_usd=sum(cost_vals) if cost_vals else None,
         calls=sum(e.calls for e in events),
+        cache_write_input_tokens=sum(e.cache_write_input_tokens for e in events),
     )
 
 
@@ -118,4 +120,3 @@ PlanTurnHandler = Callable[[str], None]
 # (None/falsy keeps the original). Default behaviour (when the hook is None)
 # is for the SDK to emit the interruption_marker AIMessage itself.
 InterruptHandler = Callable[[str], str]
-

@@ -25,7 +25,6 @@ from ness_cli.tui.constants import (
 )
 from ness_cli.tui.models import MenuItem
 from ness_cli.tui.utils import term_height, term_width
-from ness_cli.chat_model import active_model_name, active_reasoning_effort
 from ness_cli.config import (
     available_model_ids,
     reasoning_efforts_for_model,
@@ -225,7 +224,7 @@ class MenuMixin:
                 return
 
     def _current_model_slug(self) -> str:
-        current = active_model_name()
+        current = self.coding.model_name
         for slug in available_model_ids():
             if slug == current or slug.endswith(f"/{current}"):
                 return slug
@@ -324,8 +323,8 @@ class MenuMixin:
         return items
 
     def _config_reasoning_items(self) -> list[MenuItem]:
-        current = active_reasoning_effort()
-        levels = reasoning_efforts_for_model(active_model_name())
+        current = self.coding.reasoning_effort
+        levels = reasoning_efforts_for_model(self.coding.model_name)
         return [MenuItem(level, level, suffix="(current)" if level == current else "") for level in levels]
 
     def _slash_menu_items(self) -> list[MenuItem]:

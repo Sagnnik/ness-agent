@@ -9,8 +9,15 @@ from ness_agent.tracing.config import PricingDict
 
 
 # Sentinel for empty-model aggregation so we can start with zero-valued dicts.
-_EMPTY = {"input_tokens": 0, "uncached_input_tokens": 0, "cached_input_tokens": 0,
-          "output_tokens": 0, "calls": 0, "cost_usd": 0.0}
+_EMPTY = {
+    "input_tokens": 0,
+    "uncached_input_tokens": 0,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 0,
+    "calls": 0,
+    "cost_usd": 0.0,
+}
 
 # --- helpers ------------------------------------------------------------
 def _value(obj: Any, name: str) -> Any:
@@ -65,6 +72,7 @@ def _model_cost_to_token_usage(model: str, mc: dict[str, int | float]) -> TokenU
         input_tokens=input_tokens,
         uncached_input_tokens=int(mc["uncached_input_tokens"]),
         cached_input_tokens=cached,
+        cache_write_input_tokens=int(mc["cache_write_input_tokens"]),
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         cost_usd=cost_usd or None,
@@ -89,6 +97,7 @@ class TokenUsage:
     input_tokens: int = 0
     uncached_input_tokens: int = 0
     cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     cost_usd: float | None = None
@@ -128,10 +137,30 @@ class CostTracker:
         self,
         pricing: PricingDict | None = None,
         estimate_cost: Callable[[str, int, int, int], float | None] | None = None,
+        *,
+        _aggregate: "CostTracker | None" = None,
+        _share_pricing: bool = False,
     ) -> None:
-        self.pricing: PricingDict = dict(pricing or {})
+        self.pricing: PricingDict = (
+            pricing if _share_pricing and pricing is not None else dict(pricing or {})
+        )
         self.estimate_cost = estimate_cost
         self._models: dict[str, dict[str, int | float]] = {}
+        self._aggregate = _aggregate
+
+    def fork_for_session(self) -> "CostTracker":
+        """Return an empty tracker that also rolls new usage into this tracker.
+
+        Pricing is intentionally shared so catalog updates are immediately
+        visible to every live session. Durable replay uses :meth:`restore`,
+        which bypasses the live agent aggregate.
+        """
+        return CostTracker(
+            pricing=self.pricing,
+            estimate_cost=self.estimate_cost,
+            _aggregate=self,
+            _share_pricing=True,
+        )
 
     # --- ingestion ------------------------------------------------------
     def add(
@@ -140,6 +169,26 @@ class CostTracker:
         model_name: str | None = None,
         response_metadata: dict[str, Any] | None = None,
     ) -> TokenUsage | None:
+        """Ingest live usage and propagate it to the agent aggregate, if any."""
+        return self._add(usage, model_name, response_metadata, propagate=True)
+
+    def restore(
+        self,
+        usage: Any,
+        model_name: str | None = None,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> TokenUsage | None:
+        """Restore durable usage into this tracker without billing it again."""
+        return self._add(usage, model_name, response_metadata, propagate=False)
+
+    def _add(
+        self,
+        usage: Any,
+        model_name: str | None,
+        response_metadata: dict[str, Any] | None,
+        *,
+        propagate: bool,
+    ) -> TokenUsage | None:
         if not usage:
             return None
         model = model_name or ""
@@ -147,6 +196,12 @@ class CostTracker:
         output_tokens = _usage_value(usage, "output_tokens", "completion_tokens")
         total_tokens = _usage_value(usage, "total_tokens") or input_tokens + output_tokens
         cache_read = _detail_value(usage, "input_token_details", "cache_read", "cached_tokens")
+        cache_write = _detail_value(
+            usage,
+            "input_token_details",
+            "cache_creation",
+            "cache_write_tokens",
+        )
         uncached_input = max(input_tokens - cache_read, 0)
 
         metadata = response_metadata or {}
@@ -164,21 +219,13 @@ class CostTracker:
         else:
             cost_source = None
 
-        mc = self._models.setdefault(model, dict(_EMPTY))
-        mc["input_tokens"] += input_tokens
-        mc["uncached_input_tokens"] += uncached_input
-        mc["cached_input_tokens"] += cache_read
-        mc["output_tokens"] += output_tokens
-        mc["calls"] += 1
-        if cost_usd is not None:
-            mc["cost_usd"] += cost_usd
-
         cache_hit_rate = cache_read / input_tokens if input_tokens else 0.0
-        return TokenUsage(
+        result = TokenUsage(
             model=model,
             input_tokens=input_tokens,
             uncached_input_tokens=uncached_input,
             cached_input_tokens=cache_read,
+            cache_write_input_tokens=cache_write,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             cost_usd=cost_usd,
@@ -186,6 +233,22 @@ class CostTracker:
             cache_hit_rate=cache_hit_rate,
             calls=1,
         )
+        self._accumulate(result)
+        if propagate and self._aggregate is not None:
+            self._aggregate._accumulate(result)
+        return result
+
+    def _accumulate(self, usage: TokenUsage) -> None:
+        """Accumulate an already-priced usage record without re-estimation."""
+        mc = self._models.setdefault(usage.model, dict(_EMPTY))
+        mc["input_tokens"] += usage.input_tokens
+        mc["uncached_input_tokens"] += usage.uncached_input_tokens
+        mc["cached_input_tokens"] += usage.cached_input_tokens
+        mc["cache_write_input_tokens"] += usage.cache_write_input_tokens
+        mc["output_tokens"] += usage.output_tokens
+        mc["calls"] += usage.calls
+        if usage.cost_usd is not None:
+            mc["cost_usd"] += usage.cost_usd
 
     def _estimate(self, model_name: str, uncached: int, cached: int, output: int) -> float | None:
         if self.estimate_cost is not None:
@@ -213,6 +276,7 @@ class CostTracker:
             total["input_tokens"] += mc["input_tokens"]
             total["uncached_input_tokens"] += mc["uncached_input_tokens"]
             total["cached_input_tokens"] += mc["cached_input_tokens"]
+            total["cache_write_input_tokens"] += mc["cache_write_input_tokens"]
             total["output_tokens"] += mc["output_tokens"]
             total["calls"] += mc["calls"]
             total["cost_usd"] += mc["cost_usd"]
@@ -233,6 +297,10 @@ class CostTracker:
     @property
     def cached_input_tokens(self) -> int:
         return int(sum(m["cached_input_tokens"] for m in self._models.values()))
+
+    @property
+    def cache_write_input_tokens(self) -> int:
+        return int(sum(m["cache_write_input_tokens"] for m in self._models.values()))
 
     @property
     def output_tokens(self) -> int:
@@ -265,6 +333,7 @@ class CostTracker:
             f"Input tokens: {self.input_tokens:,}",
             f"Uncached input: {self.uncached_input_tokens:,}",
             f"Cached read: {self.cached_input_tokens:,}",
+            f"Cache write: {self.cache_write_input_tokens:,}",
             f"Output tokens: {self.output_tokens:,}",
             f"Total tokens: {self.total_tokens:,}",
             f"Cache hit rate: {self.cache_hit_rate:.1%}",

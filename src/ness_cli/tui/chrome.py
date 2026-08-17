@@ -17,8 +17,7 @@ from ness_cli.tui.constants import (
 from ness_cli.tui.formatting import _format_duration, worked_fragments, working_fragments
 from ness_cli.tui.utils import context_bar, display_cwd, model_footer_name, term_height, term_width
 from ness_cli.tui.widgets import TranscriptViewportControl
-from ness_cli.chat_model import active_model_name, active_reasoning_effort
-from ness_cli.provider.registry import active_provider
+from ness_cli.provider.registry import get_provider
 
 
 class ChromeMixin:
@@ -285,7 +284,7 @@ class ChromeMixin:
         used = int(self.context_used or 0)
         total = int(self.context_total or 0)
         tracker = self.coding.cost_tracker
-        billing_label = active_provider().billing_label
+        billing_label = get_provider(self.coding.provider_id).billing_label
         cache_key = (
             width,
             tracker.input_tokens,
@@ -330,7 +329,10 @@ class ChromeMixin:
 
     def _path_line(self):
         width = term_width()
-        right = f"{model_footer_name(active_model_name())} - {active_reasoning_effort()}"
+        right = (
+            f"{model_footer_name(self.coding.model_name)} - "
+            f"{self.coding.reasoning_effort}"
+        )
         cache_key = (width, self._cwd_line, right)
         if cache_key == self._path_line_cache_key:
             return self._path_line_cache

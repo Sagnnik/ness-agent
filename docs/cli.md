@@ -246,12 +246,12 @@ Shift+Tab toggles plan/act mode without rebuilding the graph or invalidating the
 
 - `/help`: show the command reference.
 - `/login`: authenticate or manage model providers in a dedicated picker. Selecting a connected provider activates it and offers Reconnect/Log out; selecting a disconnected provider starts authentication immediately. Provider changes rebuild the model while preserving the thread.
-- `/config`: edit provider keys/endpoints, model/reasoning, behavior toggles, compaction budgets, and advanced options (persisted to global `configs.json` / `secrets.json`).
+- `/config`: edit provider keys/endpoints, model/reasoning, behavior toggles, compaction budgets, and advanced options (persisted to global `configs.json` / `secrets.json`). Model/provider/reasoning changes rebuild the selected thread and become defaults for future threads; other live thread runtimes keep their existing model configuration.
 - `/exit` or `/quit`: end the session.
 
 **Session**
 
-- `/status`: show provider authentication, account email/tier, every available usage-limit window (including weekly), reset times/credits, and session token/cache/cost stats. Subscription calls are labeled `subscription` rather than estimated as API spend.
+- `/status`: show provider authentication, account email/tier, every available usage-limit window (including weekly), reset times/credits, and the selected session's token/cache/cost stats. Subscription calls are labeled `subscription` rather than estimated as API spend.
 - `/threads`: open a scrollable saved-thread picker, ordered by recent updates and prefixed with local `YYYY-MM-DD HH:mm` timestamps. Threads with active turns show an animated working indicator; switching away does not interrupt them.
 - `/rename <name>`: set or update the current session's persistent display name (1–80 characters; requires thread autosave).
 - `/fork`: choose a human message, copy the conversation state before it into a child thread, and prefill that message for editing. Forking copies session memory/checkpoints but leaves current working-tree files unchanged.
@@ -310,7 +310,7 @@ Event kinds stored in `events.payload` (session threads only):
 
 `/threads` lists user `session-*` threads only. Each row starts with its locally converted update datetime and uses an explicit `/rename` name when present, then falls back to the archived summary or first user message. The original conversation shows `×N` when it has forks; each fork shows `fork #k` in creation order. Fork lineage is stored explicitly on the thread row; inherited usage remains in the copied event history but is excluded from the child thread's cost totals. Subagent trajectories are not stored in `events`; subagent LLM usage rolls up into the parent session's `threads` aggregates. Subagent outputs are stored in the `subagents` table.
 
-Selecting a thread rebuilds user messages, assistant tool-call turns, and tool results from saved events. The startup `--resume <thread_id>` flag remains available for automation. `spawn_subagent` tool output is supplemented from linked subagent outputs when available.
+Selecting an idle saved thread rebuilds user messages, assistant tool-call turns, and tool results from saved events. A thread that is already live keeps its own model, temporary approvals, MCP activation, graph, cancellation state, and cost total when selected again. The startup `--resume <thread_id>` flag remains available for automation. `spawn_subagent` tool output is supplemented from linked subagent outputs when available.
 
 When a thread contains a successful new-format `compaction_llm` checkpoint, resume starts from its summary and replays only raw events after `source_event_seq`. Raw conversation events remain available for audit, rollback, and forks; L3 reminder messages are never written to the event log.
 

@@ -775,9 +775,12 @@ class TranscriptMixin:
         input_tokens = int(usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("output_tokens") or 0)
         cached = int(usage.get("cached_input_tokens") or 0)
+        cache_write = int(usage.get("cache_write_input_tokens") or 0)
         parts = [f"↑ {input_tokens:,}", f"↓ {output_tokens:,}"]
-        if cached:
-            parts.append(f"⟳ {cached:,}")
+        if input_tokens:
+            parts.append(f"⟳ {cached:,} ({cached / input_tokens:.0%})")
+        if cache_write:
+            parts.append(f"cache write {cache_write:,}")
         cost = usage.get("cost_usd")
         if cost is not None and float(cost) > 0:
             parts.append(f"${float(cost):.4f}")

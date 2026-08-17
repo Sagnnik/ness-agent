@@ -155,7 +155,7 @@ def test_clone_for_thread_keeps_source_session_independent(coding):
     assert clone.session._pending_bootstrap
 
 
-def test_resume_replays_each_threads_cost_only_once(coding):
+def test_resume_rebuilds_the_selected_threads_local_cost(coding):
     for thread_id in ("t-cost-a", "t-cost-b"):
         coding.thread_store.append_event(
             thread_id, {"kind": "user", "content": thread_id}
@@ -182,6 +182,8 @@ def test_resume_replays_each_threads_cost_only_once(coding):
     assert [call.args[0][0]["content"] for call in restore.call_args_list] == [
         "t-cost-a",
         "t-cost-b",
+        "t-cost-a",
+        "t-cost-b",
     ]
 
 
@@ -201,6 +203,37 @@ def test_reload_model_refreshes_vision_capability(coding):
 
     assert coding._vision is True
     assert coding.session._vision is True
+
+
+def test_reload_model_updates_selected_and_future_but_not_existing_sibling(coding):
+    sibling = CodingSession(coding.agent, thread_id="t-existing", vision=False)
+    old_model = sibling.cfg.model
+    new_model = FakeListChatModel(responses=["new"])
+
+    with (
+        patch("ness_cli.chat_model.create_model", return_value=new_model),
+        patch("ness_cli.chat_model.create_reflection_model", return_value=new_model),
+        patch("ness_cli.chat_model.active_model_name", return_value="new-model"),
+        patch("ness_cli.chat_model.active_provider_id", return_value="openrouter"),
+        patch("ness_cli.chat_model.active_reasoning_effort", return_value="high"),
+        patch("ness_cli.config.context_window_for", return_value=64_000),
+        patch(
+            "ness_cli.config.Settings.supports_vision",
+            new_callable=PropertyMock,
+            return_value=True,
+        ),
+    ):
+        coding.reload_model()
+        future = coding.new_for_thread("t-future")
+
+    assert sibling.cfg.model is old_model
+    assert sibling.cfg.options.context_window != 64_000
+    assert coding.cfg.model is new_model
+    assert coding.cfg.options.context_window == 64_000
+    assert coding.model_name == "new-model"
+    assert coding.reasoning_effort == "high"
+    assert future.cfg.model is new_model
+    assert future.cfg.options.context_window == 64_000
 
 
 def test_rollback_truncates_and_restores_files(coding):

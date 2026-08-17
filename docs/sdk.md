@@ -56,6 +56,39 @@ asyncio.run(main())
 
 `tools=` accepts a mix of `BaseTool` instances, plain callables (auto-wrapped), and built-in name strings (`"read"`, `"grep"`, `"shell"`, …). Pass `overlay=NoOverlay()` to drop L3 entirely. Instruction bodies are importable — e.g. `from ness_agent.instructions import L0_HARNESS, PLAN_MODE`.
 
+### Project agents and concurrent sessions
+
+A `NessAgent` is a project-scoped runtime: it owns shared persistence, memory, hooks, skill and tool catalogs, tracing, pricing, and defaults. Each call to `agent.session(...)` creates a separate effective runtime with its own graph/checkpointer, model fields, copied options, temporary permission rules, active MCP set, cancellation state, and cost tracker.
+
+```python
+agent = NessAgent(model=default_model, prompt=PromptLayersConfig())
+
+first = agent.session(thread_id="thread-a")
+second = agent.session(thread_id="thread-b", model=specialized_model)
+
+await asyncio.gather(
+    first.run("inspect the API"),
+    second.run("inspect the database"),
+)
+```
+
+Use a different `Session` for each concurrent thread; two simultaneous `run()`/`stream()` calls on the same `Session` are unsupported. Use a different `NessAgent` for an unrelated project because project paths and shared stores belong to the agent.
+
+Changing defaults affects future sessions only:
+
+```python
+agent.configure_default_models(
+    model=new_default,
+    reflection_model=new_reflection_default,
+    context_window=200_000,
+)
+
+# Existing sessions remain pinned. This session inherits the new defaults.
+third = agent.session(thread_id="thread-c")
+```
+
+To deliberately change one live session, call `session.configure_models(...)`. Read thread usage from `session.cost_tracker`; `agent.config.cost_tracker` is the live current-process aggregate across sessions. Replayed history is restored into the session tracker without being counted as new aggregate spend.
+
 ### What the host owns
 
 Bare `Session.run` is the turn engine only. Your application still needs to:

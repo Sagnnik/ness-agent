@@ -16,7 +16,6 @@ from ness_cli.tui.config_registry import (
 )
 from ness_cli.config_store import write_config, write_secret
 from ness_cli.chat_model import (
-    active_model_name,
     active_reasoning_effort,
     set_active_model,
     set_active_reasoning_effort,
@@ -229,13 +228,13 @@ class ConfigFlowMixin:
             self.invalidate()
 
     def _open_config_reasoning_picker(self) -> None:
-        model_name = active_model_name()
+        model_name = self.coding.model_name
         efforts = reasoning_efforts_for_model(model_name)
         if not efforts:
             self._config_note("Current model does not support reasoning effort.")
             self._finish_config()
             return
-        current_effort = active_reasoning_effort()
+        current_effort = self.coding.reasoning_effort
         index = next((i for i, item in enumerate(self._config_reasoning_items()) if item.key == current_effort), 0)
         self._open_picker("config_reasoning", "/config", index=index)
 
@@ -291,7 +290,7 @@ class ConfigFlowMixin:
         self._open_config_reasoning_picker()
 
     def _apply_config_reasoning(self, effort: str) -> None:
-        current = active_reasoning_effort()
+        current = self.coding.reasoning_effort
         reasoning_changed = effort != current
         if reasoning_changed:
             set_active_reasoning_effort(effort)  # type: ignore[arg-type]

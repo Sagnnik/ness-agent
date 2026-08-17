@@ -46,6 +46,96 @@ def _agent(tmp_path: Path, **kwargs):
     )
 
 
+def test_sessions_fork_mutable_config_and_share_project_services(tmp_path: Path):
+    agent = _agent(tmp_path)
+    first = agent.session(thread_id="session-one")
+    second = agent.session(thread_id="session-two")
+
+    assert first.config is not second.config
+    assert first.config is not agent.config
+    assert first.config.options is not second.config.options
+    assert first.config.cost_tracker is not second.config.cost_tracker
+    assert first.config.permission_store is not second.config.permission_store
+    assert first.config.tool_registry is not second.config.tool_registry
+    assert first.config.thread_store is second.config.thread_store is agent.config.thread_store
+    assert first.config.memory_store is second.config.memory_store is agent.config.memory_store
+    assert first.config.hook_runner is second.config.hook_runner is agent.config.hook_runner
+    assert first.config.tracer is second.config.tracer is agent.config.tracer
+
+
+def test_session_cost_is_local_and_live_usage_rolls_up_once(tmp_path: Path):
+    agent = _agent(tmp_path)
+    first = agent.session(thread_id="session-one")
+    second = agent.session(thread_id="session-two")
+    usage = {"input_tokens": 10, "output_tokens": 2}
+
+    first.cost_tracker.add(usage, "model")
+
+    assert first.cost_tracker.input_tokens == 10
+    assert second.cost_tracker.input_tokens == 0
+    assert agent.config.cost_tracker.input_tokens == 10
+
+    first.cost_tracker.restore(usage, "model")
+    assert first.cost_tracker.input_tokens == 20
+    assert agent.config.cost_tracker.input_tokens == 10
+
+
+def test_session_permissions_and_mcp_activation_are_isolated(tmp_path: Path):
+    agent = _agent(tmp_path)
+    first = agent.session(thread_id="session-one")
+    second = agent.session(thread_id="session-two")
+
+    first.config.permission_store.persist_rule(
+        "shell:run:pytest*", "allow", scope="session"
+    )
+    assert first.config.permission_store.check("shell", {"command": "pytest"}) == "allow"
+    assert second.config.permission_store.check("shell", {"command": "pytest"}) == "ask"
+    first.config.permission_store.persist_rule("shell:run:ruff*", "allow")
+    assert second.config.permission_store.check("shell", {"command": "ruff check"}) == "allow"
+
+    @tool
+    def mcp__demo__lookup() -> str:
+        """Look something up."""
+        return "ok"
+
+    first.config.tool_registry.register_dynamic([mcp__demo__lookup])
+    first.config.tool_registry.set_mcp_catalog(
+        {"demo": {"tools": [{"name": "mcp__demo__lookup"}]}}
+    )
+    added, _ = first.config.tool_registry.activate_mcp(["mcp__demo__lookup"])
+    assert added == ["mcp__demo__lookup"]
+    assert "mcp__demo__lookup" in first.config.tool_registry.tool_names()
+    assert "mcp__demo__lookup" not in second.config.tool_registry.tool_names()
+    assert "demo" in second.config.tool_registry.mcp_catalog()
+
+
+def test_model_reconfiguration_pins_existing_sessions_and_updates_defaults(tmp_path: Path):
+    agent = _agent(tmp_path)
+    existing = agent.session(thread_id="session-existing")
+    selected = agent.session(thread_id="session-selected")
+    replacement = FakeListChatModel(responses=["new"])
+
+    agent.configure_default_models(
+        model=replacement,
+        reflection_model=replacement,
+        context_window=64_000,
+    )
+    selected.configure_models(
+        model=replacement,
+        reflection_model=replacement,
+        context_window=64_000,
+        vision=False,
+    )
+    future = agent.session(thread_id="session-future")
+
+    assert existing.config.model is not replacement
+    assert existing.config.options.context_window != 64_000
+    assert selected.config.model is replacement
+    assert selected.config.options.context_window == 64_000
+    assert future.config.model is replacement
+    assert future.config.options.context_window == 64_000
+
+
 def test_summarize_appends_human_instruction_to_exact_prefix():
     seen = {}
 
@@ -730,8 +820,12 @@ def test_aggregate_usage_sums_calls_and_costs():
     assert aggregate_usage([]) is None
     total = aggregate_usage(
         [
-            UsageEvent("m", 10, 8, 2, 3, 0.01, calls=1),
-            UsageEvent("m", 20, 15, 5, 4, 0.02, calls=1),
+            UsageEvent(
+                "m", 10, 8, 2, 3, 0.01, calls=1, cache_write_input_tokens=7
+            ),
+            UsageEvent(
+                "m", 20, 15, 5, 4, 0.02, calls=1, cache_write_input_tokens=11
+            ),
         ]
     )
     assert total is not None
@@ -739,6 +833,7 @@ def test_aggregate_usage_sums_calls_and_costs():
     assert total.input_tokens == 30
     assert total.uncached_input_tokens == 23
     assert total.cached_input_tokens == 7
+    assert total.cache_write_input_tokens == 18
     assert total.output_tokens == 7
     assert total.cost_usd == 0.03
     assert total.calls == 2
@@ -782,7 +877,7 @@ def test_run_result_usage_total_accumulates_bridge_events(tmp_path: Path):
         session._turn_usages = []
         token = _active_session.set(session)
         try:
-            bridge = agent.config._usage_bridge
+            bridge = session.config._usage_bridge
             bridge(UsageEvent("m", 100, 90, 10, 5, 0.1))
             bridge(UsageEvent("m", 200, 150, 50, 8, 0.2))
             assert session._last_usage is not None

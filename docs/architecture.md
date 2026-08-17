@@ -12,6 +12,20 @@ Ness Agent is split into a reusable **SDK** and a **coding CLI adapter** (Ness).
 
 See also: [SDK guide](sdk.md) · [CLI guide](cli.md) · [Configuration](configuration.md)
 
+### Runtime ownership
+
+`NessAgent` represents one project/application runtime. It owns resolved defaults and services that are safe or useful to share across that project's sessions. `NessAgent.session()` takes a selective effective-config snapshot so live threads do not mutate one another.
+
+| Scope | State |
+|------|------|
+| Agent/project | Thread persistence, memory backend, hooks, skill loader, tool definitions and MCP catalog, persistent permission file/lock, tracer, pricing, and defaults inherited by future sessions |
+| Session/thread | Effective main/reflection models and options, temporary permission rules, active MCP tools and binding cache, cost totals, graph/checkpointer, event queue, cancellation token, mode, metadata, and adapter callbacks |
+| Turn | User input, optional mode/skill overrides, usage aggregate, streamed events, and active cancellation state |
+
+Live model usage is recorded in the session tracker and propagated once to the agent aggregate. Durable replay updates only the session tracker, so resuming a thread does not look like newly incurred provider spend. Persistent permission choices are shared through `permissions.json`; temporary `session` choices stay on the session-local view. Tool definitions are shared, while deferred MCP activation is session-local.
+
+The Ness CLI keeps one `CodingSession` runtime per live thread. `/new` and `/threads` may therefore leave one turn running while another thread becomes selected. A `/config` model/provider/reasoning change rebuilds the selected runtime and updates agent defaults for future runtimes; already-live sibling threads remain pinned.
+
 ### MCP boundary
 
 The SDK's `MCPRuntime` accepts fully resolved stdio or HTTP server specifications and owns connections, session lifecycle, tool discovery, LangChain tool conversion, calls, and structured connection state. It has no project-file, terminal, trust, or credential-storage policy, so it can be embedded in domain-specific or domain-agnostic applications.

@@ -184,6 +184,7 @@ def test_status_command_shows_session_summary(make_app):
     text = "\n".join(line.text for line in app._lines)
     assert "session status" in text
     assert "cache read" in text
+    assert "cache write" in text
 
 
 def test_rename_command_sets_normalized_session_name(make_app):
@@ -508,6 +509,7 @@ def test_config_session_toggles_update_active_runtime(make_app):
         ) = old
 
     assert options.enable_approval is False
+    assert app.coding.agent.config.options.enable_approval is False
     assert options.auto_save_threads is False
     assert options.session_end_reflection is True
     assert app.coding.thread_store.auto_save is False

@@ -15,13 +15,18 @@ agent.session(*, thread_id: str, mode: str | None = None,
               metadata: Mapping[str, Any] | None = None,
               git_available: bool | None = None, vision: bool | None = None,
               on_plan_turn: PlanTurnHandler | None = None,
-              on_interrupt: InterruptHandler | None = None) -> Session
+              on_interrupt: InterruptHandler | None = None,
+              model: BaseChatModel | None = None,
+              reflection_model: BaseChatModel | None | object = _UNSET) -> Session
+agent.configure_default_models(*, model: BaseChatModel,
+                               reflection_model: BaseChatModel | None,
+                               context_window: int | None) -> None
 agent.new_thread_id(prefix: str = "session") -> str
 ```
 
-The top-level SDK entry point owns a resolved shared configuration and creates an isolated `Session` per conversation thread. `model` is a LangChain `BaseChatModel`; `prompt` accepts `PromptLayers`, `PromptLayersConfig`, or a mapping. With `tools=None`, the SDK resolves its built-in tool set. `config` exposes the resolved `NessAgentConfig` when an application needs to inspect the constructed backends.
+The top-level SDK entry point owns project services and resolved defaults, then creates an isolated effective configuration for each `Session`. `model` is a LangChain `BaseChatModel`; `prompt` accepts `PromptLayers`, `PromptLayersConfig`, or a mapping. With `tools=None`, the SDK resolves its built-in tool set. `agent.config` exposes project defaults and the live aggregate cost tracker; `session.config` exposes the effective session fork.
 
-`session()` accepts optional per-thread metadata for the L3 overlay. `vision=True` sends supplied image URLs; `False` drops them to text and emits a warning event; `None` leaves content shape untouched. The two callback hooks live on a session, not on the shared agent, so concurrent threads do not overwrite each other.
+`session()` accepts optional per-thread metadata for the L3 overlay and effective main/reflection model overrides. `vision=True` sends supplied image URLs; `False` drops them to text and emits a warning event; `None` leaves content shape untouched. The two callback hooks live on a session, not on the shared agent, so concurrent threads do not overwrite each other. `configure_default_models()` changes inheritance for sessions created later; it does not rebuild existing sessions.
 
 ```python
 agent = NessAgent(model=model, prompt=PromptLayersConfig())
@@ -74,9 +79,18 @@ await session.run(message: str, *, images: Sequence[str] | None = None,
 
 async for event in session.stream(message: str, *, images=None,
                                   active_skills=None, mode=None): ...
+
+session.config -> NessAgentConfig
+session.cost_tracker -> CostTracker
+session.configure_models(*, model: BaseChatModel,
+                         reflection_model: BaseChatModel | None,
+                         context_window: int | None,
+                         vision: bool | None) -> None
 ```
 
 `run()` collects one complete turn. It returns assistant text, an aggregate `usage_total` over every model call in the turn, the current todos, and every intermediate event. `stream()` yields those `SessionEvent` records as the graph advances. `mode=` is a one-turn override; otherwise the session’s current `act` or `plan` mode is used.
+
+Each session owns a selective shallow fork of the agent configuration. Mutable runtime state—models and options, temporary permission rules, active MCP tools, and cost totals—is isolated. Project services such as thread persistence, hooks, memory, and the underlying permission/tool catalogs remain shared. `session.config` exposes the effective session view; `agent.config` remains the defaults inherited by future sessions plus the live agent-level cost aggregate.
 
 Important control and inspection methods:
 
@@ -87,6 +101,7 @@ Important control and inspection methods:
 | `bootstrap(messages)` | Seed prior messages into the next turn once; use for resume or rollback replay. |
 | `cancel()` / `is_cancelled()` | Request and inspect cooperative cancellation of the active stream. |
 | `request_compact()` | Request compaction on the next turn. |
+| `configure_models(...)` | Replace this session's effective main/reflection models and context settings, then rebuild its graph. |
 | `active_skills(names)` / `stage_skills(names)` | Replace or append one-shot skills for the next turn. |
 | `get_state()`, `get_messages()`, `get_todos()` | Async snapshots of the checkpointed state. |
 | `preview_context(mode=None) -> ContextPreview` | Assemble L0–L3 for debugging without running the model. |
@@ -175,10 +190,13 @@ Sources: `src/ness_agent/context/overlay.py`, `context/coding_overlay.py`, and `
 
 ```python
 ToolRegistry(tools: Iterable[BaseTool] | None = None, *, include: Iterable[str] | None = None)
+registry.fork_for_session() -> ToolRegistry
 coding_tools(*, include: list[str] | None = None) -> ToolRegistry
 ```
 
 The registry owns known tools and the currently bound active set. Core reads are `active_tools`, `tool_map()`, `tool_names()`, `all_tools()`, and `deferred_tool_names()`. Call `bind_model(model)` to return a tool-bound chat model, and `sync()` after a structural change. `register_dynamic(tools)` adds dynamic tools as known but inactive; `activate_mcp(names)` and `deactivate_mcp(names)` return `(changed, unknown)` lists and adjust the active MCP set.
+
+`fork_for_session()` creates a registry view that shares tool definitions and the deferred MCP catalog while keeping its active MCP names, include filter, binding cache, and local generation independent. Structural catalog additions remain visible to all session views; activating a deferred MCP tool affects only that session.
 
 `set_mcp_catalog()` and `deferred_mcp_summary()` maintain the lightweight deferred-MCP prompt catalog. `is_destructive(name, args)` and `is_read_only(name, args)` expose the registry’s policy classification. `coding_tools()` is the small convenience factory for name-selected SDK tools.
 
@@ -188,9 +206,12 @@ The default tool list includes file read/write/delete/edit/glob, search, web fet
 
 ```python
 PermissionStore(*, ness_dir: Path = Path(".ness"), project_root: Path | None = None)
+store.fork_for_session() -> PermissionStore
 ```
 
 The file-backed policy store validates paths under the project root and resolves tool calls to `allow`, `deny`, or `ask` decisions. The main public operations are `check(tool, args)`, `check_with_rule(tool, args)`, `pattern_key(tool, args)`, `default_rule_for(tool, args)`, `persist_rule(...)`, `remove_rule(bucket, index)`, `list_rules()`, and `clear_session_rules()`. Use it when embedding an operator-approved policy rather than bypassing the tool executor.
+
+`fork_for_session()` shares the persistent `permissions.json` path and synchronization lock while copying temporary allow/deny rules. A `session` decision therefore affects one session; `always`/`never` decisions are atomically persisted and become visible to every session on the project.
 
 ### `Hook` and `HookRunner`
 
@@ -296,10 +317,14 @@ Sources: `src/ness_agent/memory.py` and `persistence.py`.
 PricingDict = dict[str, tuple[float, float, float]]
 CostTracker(pricing: PricingDict | None = None,
             estimate_cost: Callable[[str, int, int, int], float | None] | None = None)
+tracker.fork_for_session() -> CostTracker
 tracker.add(usage, model_name=None, response_metadata=None) -> TokenUsage | None
+tracker.restore(usage, model_name=None, response_metadata=None) -> TokenUsage | None
 ```
 
 `TokenUsage` is a slots dataclass with model, input/uncached/cached/output/total tokens, `cost_usd`, `cost_source`, cache-hit rate, and calls. `as_dict()` serializes it. `CostTracker.add()` ingests provider usage and prefers provider-reported cost, then a supplied estimator, then a matching substring key in `pricing`. Pricing triples are USD per million tokens: `(input, output, cache_read_ratio)`.
+
+`CostTracker.fork_for_session()` returns an empty tracker with shared pricing. New usage also rolls into the parent tracker; `restore()` loads durable historical usage locally without changing that live aggregate. Read per-thread totals from `session.cost_tracker` and current-process agent totals from `agent.config.cost_tracker`.
 
 Use `for_model(model)`, `total()`, `models()`, or the scalar aggregate properties (`input_tokens`, `output_tokens`, `total_tokens`, `calls`, `cost_usd`, `cache_hit_rate`, `total_cost_usd`) to inspect accumulated data. `report()` returns a text report.
 

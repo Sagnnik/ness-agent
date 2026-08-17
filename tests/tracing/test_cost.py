@@ -7,12 +7,15 @@ import pytest
 from ness_agent.tracing.cost import CostTracker, TokenUsage
 
 
-def _fake_usage(input_tokens=100, output_tokens=20, cache_read=0):
+def _fake_usage(input_tokens=100, output_tokens=20, cache_read=0, cache_write=0):
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
-        "input_token_details": {"cache_read": cache_read} if cache_read else {},
+        "input_token_details": {
+            "cache_read": cache_read,
+            "cache_creation": cache_write,
+        },
     }
 
 
@@ -35,6 +38,19 @@ def test_cost_tracker_pricing_dict_applies_cache_read_ratio():
     # 800 uncached * 2.50 + 200 cached * 2.50 * 0.50 + 0 = 2000 + 250 = 2250 / 1M
     assert usage.cost_usd == pytest.approx(0.00225)
     assert usage.cache_hit_rate == 0.2
+
+
+def test_cost_tracker_records_cache_writes_without_changing_input_accounting():
+    tracker = CostTracker()
+    usage = tracker.add(
+        _fake_usage(input_tokens=1_000, cache_read=200, cache_write=750),
+        model_name="gpt-test",
+    )
+
+    assert usage is not None
+    assert usage.cache_write_input_tokens == 750
+    assert usage.uncached_input_tokens == 800
+    assert tracker.cache_write_input_tokens == 750
 
 
 def test_cost_tracker_per_model_breakdown():

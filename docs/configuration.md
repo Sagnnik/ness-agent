@@ -79,6 +79,12 @@ Provider-specific model and reasoning choices are nested under
 `provider_profiles` in `configs.json`, so switching providers restores each
 provider's last selection. Legacy top-level OpenRouter settings remain valid.
 
+In the concurrent TUI, saved configuration is the default for new thread
+runtimes. Changing the model, provider, or reasoning effort through `/config`
+also rebuilds the currently selected thread, but it does not mutate sibling
+threads that are already live. Selecting one of those threads later restores
+its pinned runtime configuration.
+
 ---
 
 ## Environment variables

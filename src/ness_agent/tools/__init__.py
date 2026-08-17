@@ -65,12 +65,22 @@ TOOL_CATALOG_GROUPS = (
 FULL_TOOL_SET = set(ALWAYS_ON) | set(CORE) | set(DISCOVERY) | set(ADVANCED)
 
 
+class ToolCatalogState:
+    """Project-wide tool definitions/catalog shared by registry views."""
+
+    def __init__(self, tools: Iterable[BaseTool]) -> None:
+        self.all_tools: list[BaseTool] = list(tools)
+        self.tool_map: dict[str, BaseTool] = {t.name: t for t in self.all_tools}
+        self.mcp_catalog: dict[str, dict[str, Any]] = {}
+        self.generation = 0
+
+
 class ToolRegistry:
     """Bound tool set with optional MCP hot-rebind.
 
-    One registry is shared across all sessions on a :class:`~ness_agent.agent.NessAgent`
-    — that is intentional. Apps that need a different toolset should construct a
-    new agent (and thus a new registry).
+    Tool definitions and the MCP catalog are shared across sessions on a
+    :class:`~ness_agent.agent.NessAgent`; activation and binding caches are
+    session-local views.
     """
 
     def __init__(
@@ -78,6 +88,8 @@ class ToolRegistry:
         tools: Iterable[BaseTool] | None = None,
         *, 
         include: Iterable[str] | None = None,
+        _catalog_state: ToolCatalogState | None = None,
+        _active_mcp_tools: Iterable[str] | None = None,
     ) -> None:
         """Bind a set of tools, optionally filtering by name.
 
@@ -87,17 +99,32 @@ class ToolRegistry:
                      are activated. The full set remains available for later
                      activation via :meth:`activate_mcp` or :meth:`register_dynamic`.
         """
-        self._all_tools: list[BaseTool] = list(tools) if tools is not None else list(BUILTIN_TOOLS)
+        initial_tools = list(tools) if tools is not None else list(BUILTIN_TOOLS)
+        self._catalog_state = _catalog_state or ToolCatalogState(initial_tools)
+        # Compatibility aliases for SDK callers that inspect these attributes.
+        self._all_tools = self._catalog_state.all_tools
+        self._tool_map = self._catalog_state.tool_map
+        self._mcp_catalog = self._catalog_state.mcp_catalog
         self._include: set[str] | None = set(include) if include else None
-        self._tool_map: dict[str, BaseTool] = {t.name: t for t in self._all_tools}
-        self._mcp_catalog: dict[str, dict[str, Any]] = {}
-        self.active_mcp_tools: set[str] = set()
+        self.active_mcp_tools: set[str] = set(_active_mcp_tools or ())
         self._generation = 0
         self.runtime: dict[str, Any] = {}
         self._sync(force=True)
 
+    def fork_for_session(self) -> "ToolRegistry":
+        """Return a registry view with shared catalog and local activation."""
+        return ToolRegistry(
+            include=list(self._include) if self._include is not None else None,
+            _catalog_state=self._catalog_state,
+            _active_mcp_tools=self.active_mcp_tools,
+        )
+
+    def _runtime_generation(self) -> tuple[int, int]:
+        return self._catalog_state.generation, self._generation
+
     def _sync(self, force: bool = False) -> None:
-        if self.runtime and not force and self.runtime.get("generation") == self._generation:
+        generation = self._runtime_generation()
+        if self.runtime and not force and self.runtime.get("generation") == generation:
             return
         if self._include is not None:
             active = [t for t in self._all_tools if t.name in self._include]
@@ -109,7 +136,7 @@ class ToolRegistry:
         self.runtime["active_tools"] = active
         self.runtime["tool_map"] = {t.name: t for t in active}
         self.runtime["tool_names"] = sorted(self.runtime["tool_map"])
-        self.runtime["generation"] = self._generation
+        self.runtime["generation"] = generation
 
     @property
     def active_tools(self) -> list[BaseTool]:
@@ -153,7 +180,7 @@ class ToolRegistry:
 
     def generation(self) -> int:
         """Current generation counter — incremented on every structural change."""
-        return self._generation
+        return self._catalog_state.generation + self._generation
 
     def bump_generation(self) -> int:
         """Force-increment the generation counter (e.g. after a dynamic update)."""
@@ -182,6 +209,7 @@ class ToolRegistry:
         """Replace the MCP catalog (clears previous entries)."""
         self._mcp_catalog.clear()
         self._mcp_catalog.update(catalog or {})
+        self._catalog_state.generation += 1
 
     def deferred_mcp_summary(self) -> str:
         """List MCP servers with deferred tools.
@@ -233,7 +261,7 @@ class ToolRegistry:
             if t.name not in self._tool_map:
                 self._all_tools.append(t)
             self._tool_map[t.name] = t
-        self.bump_generation()
+        self._catalog_state.generation += 1
 
     def activate_mcp(self, names: Iterable[str]) -> tuple[list[str], list[str]]:
         """Activate MCP tools by name.

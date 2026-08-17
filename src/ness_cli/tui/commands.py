@@ -23,9 +23,7 @@ from ness_agent.workspace import setup_ness_structure
 from ness_agent.workspace.project_context import get_project_context
 from ness_cli.chat_model import (
     activate_provider,
-    active_model_name,
     active_provider_id,
-    active_reasoning_effort,
     openrouter_session,
 )
 from ness_cli.provider.profile import provider_profile
@@ -89,11 +87,13 @@ async def cmd_config(app: "TuiApp", args: str) -> None:
         await app.refresh_context_snapshot()
     if result.session_update:
         options = app.coding.cfg.options
-        options.enable_approval = (
-            settings.enable_approval and not getattr(options, "yolo_mode", False)
-        )
-        options.auto_save_threads = settings.auto_save_threads
-        options.session_end_reflection = settings.session_end_reflection
+        defaults = app.coding.agent.config.options
+        for target in (options, defaults):
+            target.enable_approval = (
+                settings.enable_approval and not getattr(target, "yolo_mode", False)
+            )
+            target.auto_save_threads = settings.auto_save_threads
+            target.session_end_reflection = settings.session_end_reflection
         app.coding.thread_store.auto_save = settings.auto_save_threads
         app.render_header()
 
@@ -470,7 +470,7 @@ def _reset_label(timestamp: int | None) -> str:
 
 
 async def cmd_status(app: "TuiApp", args: str) -> None:
-    provider = get_provider(active_provider_id())
+    provider = get_provider(app.coding.provider_id)
     try:
         provider_status = await provider.status(refresh=False)
     except Exception as exc:
@@ -479,12 +479,13 @@ async def cmd_status(app: "TuiApp", args: str) -> None:
     tracker = app.coding.cost_tracker
     input_tokens = int(tracker.input_tokens or 0)
     cached = int(tracker.cached_input_tokens or 0)
+    cache_write = int(getattr(tracker, "cache_write_input_tokens", 0) or 0)
     cache_hit = cached / input_tokens if input_tokens else None
     lines = [
         f"provider       {provider.display_name}",
         f"session id     {app.thread_id}",
-        f"model          {active_model_name()}",
-        f"reasoning      {active_reasoning_effort()}",
+        f"model          {app.coding.model_name}",
+        f"reasoning      {app.coding.reasoning_effort}",
         f"input tokens   {input_tokens:,}",
         f"output tokens  {int(tracker.output_tokens or 0):,}",
         (
@@ -494,9 +495,10 @@ async def cmd_status(app: "TuiApp", args: str) -> None:
         ),
         f"turns          {int(app.turn_count or 0)}",
         f"cache read     {cached:,}",
+        f"cache write    {cache_write:,}",
         f"cache hit      {cache_hit:.0%}" if cache_hit is not None else "cache hit      n/a",
     ]
-    if active_provider_id() == "openrouter":
+    if app.coding.provider_id == "openrouter":
         lines.append(f"openrouter id  {openrouter_session(app.thread_id) or 'not set'}")
     if provider_status is not None:
         lines.extend(

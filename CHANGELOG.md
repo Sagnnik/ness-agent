@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Per-session effective SDK configuration: `NessAgent.session()` now accepts main and reflection model overrides, `Session.config` / `Session.cost_tracker` expose the effective session view, and `Session.configure_models()` can rebind one live session without changing its siblings.
+- `NessAgent.configure_default_models()` for updating the model defaults inherited by sessions created in the future.
+
+### Changed
+
+- A `NessAgent` now acts as a project-scoped owner of shared services and defaults while every `Session` receives isolated mutable runtime views for options, temporary permission rules, active MCP tools, and cost totals. Thread persistence, hooks, memory, tool definitions, persistent permission rules, tracing, and pricing remain shared.
+- CLI model/provider/reasoning changes now update the selected thread and future sessions only; other live thread runtimes retain the model configuration with which they were created.
+- Cost reporting is session-first: live usage accumulates in both the session tracker and the agent's current-process aggregate, while replayed durable usage restores only the session total.
+
+### Fixed
+
+- Concurrent `/new` and `/threads` runtimes no longer overwrite one another's effective models, temporary approvals, MCP activation, per-session callbacks, cost totals, or displayed model/provider metadata.
+- Persistent permission updates are serialized and written atomically while `session` approval rules remain local to the session that created them.
+- Resume restores historical thread cost without double-counting it as new agent spend, forks exclude inherited usage from child totals, and rollback preserves already-incurred session cost.
+- Codex subscription conversations now use one stable UUID per thread for `prompt_cache_key` and the private backend's session-routing header without sending public-API-only cache controls; cache reads and writes are reported per call, append-only prefixes can be verified through privacy-safe debug fingerprints, and backend validation errors include their response detail and request ID.
+
 ## [0.2.2] - 2026-08-15 — Released
 
 ### Added

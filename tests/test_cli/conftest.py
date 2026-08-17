@@ -169,6 +169,7 @@ class _FakeCostTracker:
         self.input_tokens = 0
         self.uncached_input_tokens = 0
         self.cached_input_tokens = 0
+        self.cache_write_input_tokens = 0
         self.output_tokens = 0
         self.cost_usd = 0.0
         self.calls = 0
@@ -202,8 +203,21 @@ class FakeCoding:
         self.hook_runner = _FakeHookRunner()
         self.skill_loader = _FakeSkillLoader()
         self.tool_registry = _FakeToolRegistry()
+        self.model_name = "test-model"
+        self.provider_id = "openrouter"
+        self.reasoning_effort = "medium"
+        options = SimpleNamespace(
+            enable_approval=True,
+            yolo_mode=False,
+            auto_save_threads=True,
+            session_end_reflection=False,
+        )
+        self.cfg = SimpleNamespace(model=SimpleNamespace(), options=options)
         self.agent = SimpleNamespace(
-            config=SimpleNamespace(model=SimpleNamespace())
+            config=SimpleNamespace(
+                model=SimpleNamespace(),
+                options=SimpleNamespace(**vars(options)),
+            )
         )
         self._pending_skills: list[str] = []
 
@@ -321,9 +335,13 @@ class FakeCoding:
             "hook_runner",
             "skill_loader",
             "tool_registry",
+            "cfg",
             "agent",
         ):
             setattr(clone, name, getattr(self, name))
+        clone.model_name = self.model_name
+        clone.provider_id = self.provider_id
+        clone.reasoning_effort = self.reasoning_effort
         clone.mode = self.mode
         clone.thread_id = thread_id
         return clone

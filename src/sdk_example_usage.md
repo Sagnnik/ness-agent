@@ -617,7 +617,8 @@ async def resume_thread(session, thread_id: str, *, vision: bool | None = None) 
     events = store.load_thread_events(thread_id)
     if not events:
         return False
-    permission_store = session.agent.config.permission_store
+    # Use the effective session view so temporary approval rules are preserved.
+    permission_store = session.config.permission_store
     messages = events_to_messages(
         events,
         store.list_subagents(thread_id),
@@ -767,16 +768,18 @@ agent = NessAgent(
 )
 ```
 
-### Reading cost data after a run
+### Reading session and live-agent cost after a run
 
 ```python
 session = agent.session(thread_id="abc")
 await session.run("Hello")
 
-cost = agent.config.cost_tracker
-print(cost.for_model("gpt-4o").cost_usd)   # per model
-print(cost.total().cost_usd)               # aggregate across all models seen
-print(cost.report())                        # multi-line string breakdown
+session_cost = session.cost_tracker
+print(session_cost.for_model("gpt-4o").cost_usd)  # this thread, including restored history
+print(session_cost.report())                       # per-session report
+
+live_cost = agent.config.cost_tracker
+print(live_cost.total().cost_usd)           # live calls across this agent's sessions
 ```
 
 ### Span names

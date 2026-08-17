@@ -32,6 +32,7 @@ _INTERRUPTED_SUFFIX = " … [interrupted]"
 # the durable transcript stays clean and file contents that happen to contain
 # the marker survive expansion untouched.
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[Image #\d+\]")
+_UNSET = object()
 
 
 class CodingSession:
@@ -65,13 +66,34 @@ class CodingSession:
         git_available: bool | None = None,
         metadata: dict[str, Any] | None = None,
         instructions_dir: Path | None = None,
+        model: Any | None = None,
+        reflection_model: Any = _UNSET,
     ) -> None:
         self.agent = agent
-        self.cfg = agent.config
         self.thread_id = thread_id
         self._vision = vision
         self._git_available = git_available
         self._metadata = dict(metadata or {})
+
+        session_kwargs: dict[str, Any] = {}
+        if model is not None:
+            session_kwargs["model"] = model
+        if reflection_model is not _UNSET:
+            session_kwargs["reflection_model"] = reflection_model
+
+        # Build the SDK Session first: it owns the effective config fork used
+        # by all adapter-facing services below.
+        self._session = agent.session(
+            thread_id=thread_id,
+            mode=mode,
+            metadata=metadata,
+            git_available=git_available,
+            vision=vision,
+            on_plan_turn=self._on_plan_turn,
+            on_interrupt=self._on_interrupt,
+            **session_kwargs,
+        )
+        self.cfg = self._session.config
 
         self.ness_dir = Path(self.cfg.options.ness_dir or Path.cwd() / ".ness")
         self.project_root = Path(self.cfg.options.project_root or Path.cwd())
@@ -92,29 +114,32 @@ class CodingSession:
         self.skill_loader = self.cfg.skill_loader
         self.tool_registry = self.cfg.tool_registry
 
-        # Build the underlying SDK Session and install the per-Session hooks (on_plan_turn and on_interrupt).
-        self._session = agent.session(
-            thread_id=thread_id,
-            mode=mode,
-            metadata=metadata,
-            git_available=git_available,
-            vision=vision,
-            on_plan_turn=self._on_plan_turn,
-            on_interrupt=self._on_interrupt,
-        )
-
         # Per-turn plan text accumulator
         self._plan_turn_texts: list[str] = []
-        # This tracker is process-wide for the coding agent. Durable usage is
-        # replayed once per thread, never on every A→B→A switch.
-        self._restored_cost_threads: set[str] = {thread_id}
+        self._cost_restored = True
+
+        from ness_cli.chat_model import (
+            active_model_name,
+            active_provider_id,
+            active_reasoning_effort,
+        )
+
+        self._model_name = str(
+            getattr(self.cfg.model, "model", None)
+            or getattr(self.cfg.model, "model_name", None)
+            or active_model_name()
+        )
+        self._provider_id = active_provider_id()
+        self._reasoning_effort = active_reasoning_effort()
 
     def new_for_thread(self, thread_id: str) -> "CodingSession":
         """Create an independent blank session without mutating this one.
         
         This is used to create a new session for a new thread during an active turn.
         """
-        clone = type(self)(
+        from ness_cli.chat_model import create_model, create_reflection_model
+
+        clone = CodingSession(
             self.agent,
             thread_id=thread_id,
             mode=self.mode,
@@ -122,29 +147,24 @@ class CodingSession:
             git_available=self._git_available,
             metadata=self._metadata,
             instructions_dir=self.instructions_dir,
+            model=create_model(thread_id),
+            reflection_model=create_reflection_model(thread_id),
         )
-        # Cost restoration is process-wide.  Share the existing guard set so
-        # loading A -> B -> A through separate live sessions cannot replay the
-        # same durable usage more than once.
-        clone._restored_cost_threads = self._restored_cost_threads
-        clone._restored_cost_threads.add(thread_id)
         return clone
 
     async def clone_for_thread(self, thread_id: str) -> "CodingSession":
         """Create an independent live session for an existing thread.
 
-        The clone shares agent-level services (tools, persistence, permissions,
-        and aggregate cost tracking) but owns its graph, checkpointer, event
-        queue, cancellation token, and per-turn hooks.  Unlike ``resume()``, it
-        never archives or mutates this session, so both threads may keep
-        running concurrently.
+        The clone shares project services and the live agent cost aggregate,
+        but owns its effective config, thread cost tracker, graph, checkpointer,
+        event queue, cancellation token, permissions, tool activation, and
+        per-turn hooks. Unlike ``resume()``, it never archives or mutates this
+        session, so both threads may keep running concurrently.
 
         new session + hydrate from disk (for thread switch during an active turn).
         """
-        already_restored = thread_id in self._restored_cost_threads
         clone = self.new_for_thread(thread_id)
-        if not already_restored:
-            self._restored_cost_threads.discard(thread_id)
+        clone._cost_restored = False
         if not await clone.resume(thread_id):
             raise ValueError(f"No saved thread: {thread_id}")
         return clone
@@ -184,6 +204,18 @@ class CodingSession:
         return self._session.context_total
 
     @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def provider_id(self) -> str:
+        return self._provider_id
+
+    @property
+    def reasoning_effort(self) -> str:
+        return self._reasoning_effort
+
+    @property
     def last_usage(self) -> dict[str, Any] | None:
         """The last usage of the active model."""
         usage = self._session._last_usage
@@ -194,6 +226,7 @@ class CodingSession:
             "input_tokens": usage.input_tokens,
             "uncached_input_tokens": usage.uncached_input_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
+            "cache_write_input_tokens": usage.cache_write_input_tokens,
             "output_tokens": usage.output_tokens,
             "cost_usd": usage.cost_usd,
             "calls": usage.calls,
@@ -212,6 +245,7 @@ class CodingSession:
             "input_tokens": usage.input_tokens,
             "uncached_input_tokens": usage.uncached_input_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
+            "cache_write_input_tokens": usage.cache_write_input_tokens,
             "output_tokens": usage.output_tokens,
             "cost_usd": usage.cost_usd,
             "calls": usage.calls,
@@ -267,24 +301,38 @@ class CodingSession:
         from ness_cli.config import context_window_for, settings
         from ness_cli.provider.openrouter.catalog import model_record
 
-        self.cfg.model = create_model(self.thread_id)
-        self.cfg.reflection_model = create_reflection_model(self.thread_id)
-        self._vision = settings.supports_vision
-        self._session._vision = self._vision
+        model = create_model(self.thread_id)
+        reflection_model = create_reflection_model(self.thread_id)
+        vision = settings.supports_vision
         window = context_window_for(active_model_name())
-        self.cfg.options.context_window = window
+        self.agent.configure_default_models(
+            model=model,
+            reflection_model=reflection_model,
+            context_window=window,
+        )
+        self._session.configure_models(
+            model=model,
+            reflection_model=reflection_model,
+            context_window=window,
+            vision=vision,
+        )
+        self._vision = vision
+        from ness_cli.chat_model import active_provider_id, active_reasoning_effort
+
+        self._model_name = active_model_name()
+        self._provider_id = active_provider_id()
+        self._reasoning_effort = active_reasoning_effort()
         record = model_record(active_model_name())
         if (
             record is not None
             and record.input_price is not None
             and record.output_price is not None
         ):
-            self.cost_tracker.pricing[record.id] = (
+            self.agent.config.cost_tracker.pricing[record.id] = (
                 record.input_price,
                 record.output_price,
                 record.cache_read_ratio,
             )
-        self._session.rebuild_graph()
 
     def save_thread(self) -> str:
         """Archive the current thread (the CLI's /save)."""
@@ -547,6 +595,13 @@ class CodingSession:
     # Resume / reset / rollback
     # ----------------------------------------------------------------------
 
+    def _reset_session_cost_tracker(self) -> None:
+        """Start a blank thread tracker while preserving the agent aggregate."""
+        tracker = self.agent.config.cost_tracker.fork_for_session()
+        self.cfg.cost_tracker = tracker
+        self.cost_tracker = tracker
+        self._cost_restored = False
+
     async def resume(
         self,
         thread_id: str,
@@ -577,6 +632,7 @@ class CodingSession:
         if thread_id != self.thread_id:
             await self.finalize_reflection()
             self.thread_store.archive_thread(self.thread_id)
+            self._reset_session_cost_tracker()
 
         subagents = self.thread_store.list_subagents(thread_id)
         messages = events_to_messages(
@@ -585,13 +641,12 @@ class CodingSession:
             vision=self._vision,
             permission_store=self.permission_store,
         )
-        if replay_cost and thread_id not in self._restored_cost_threads:
+        if replay_cost and not self._cost_restored:
             restore_cost_from_events(events, self.cost_tracker)
-            self._restored_cost_threads.add(thread_id)
+            self._cost_restored = True
 
         self.thread_id = thread_id
         self._session.thread_id = thread_id
-        self._restored_cost_threads.add(thread_id)
         self._plan_turn_texts = []
         self._session.reset_checkpointer()
         self._session.bootstrap(messages)
@@ -640,9 +695,10 @@ class CodingSession:
         """
         await self.finalize_reflection()
         self.thread_store.archive_thread(self.thread_id)
+        self._reset_session_cost_tracker()
         self.thread_id = thread_id
         self._session.thread_id = thread_id
-        self._restored_cost_threads.add(thread_id)
+        self._cost_restored = True
         self._plan_turn_texts = []
         self._session.reset_checkpointer()
         await self.refresh_context_snapshot()
@@ -657,9 +713,9 @@ class CodingSession:
         2. Session memory: overwrite ``runtime/sessions/mem_<thread_id>.md`` from the
            checkpoint snapshot.
         3. Conversation: hard-truncate the events tail at ``user_seq`` and
-           rebuild the live graph from the remaining events. The in-process
-           cost_tracker is intentionally left untouched (its tally is
-           process-global billing).
+           rebuild the live graph from the remaining events. The session cost
+           tracker is intentionally left untouched because the provider spend
+           was already incurred.
 
         Returns a human-readable status string (non-empty on success).
         """

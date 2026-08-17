@@ -44,7 +44,8 @@ PACKAGING_SMOKE=1 uv run pytest -q -m packaging
 
 ## Pull requests
 
-1. Please open an issue to propose features or major changes before submitting a PR so we can align on design early.
+1. Small PRs only — keep changes focused and minimal. Large PRs will not be accepted.
+2. Large feature requests — open an issue first to discuss the design before writing any code.
 2. Branch from `main` (e.g. `feat/cli-cron`, `fix/session-resume`).
 3. Keep changes focused; match existing code style in touched files.
 4. Ensure tests pass before opening a PR.

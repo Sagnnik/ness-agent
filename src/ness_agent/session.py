@@ -6,6 +6,7 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -131,6 +132,7 @@ def _ensure_config_event_bridges(cfg: Any) -> None:
                     "input_tokens": event.input_tokens,
                     "uncached_input_tokens": event.uncached_input_tokens,
                     "cached_input_tokens": event.cached_input_tokens,
+                    "cache_write_input_tokens": event.cache_write_input_tokens,
                     "output_tokens": event.output_tokens,
                     "cost_usd": event.cost_usd,
                     "calls": event.calls,
@@ -161,6 +163,7 @@ class Session:
         vision: bool | None = None,
         on_plan_turn: PlanTurnHandler | None = None,
         on_interrupt: InterruptHandler | None = None,
+        _config: Any | None = None,
     ):
         """Create a new interaction session bound to a single thread.
 
@@ -200,7 +203,7 @@ class Session:
         self.mode = mode
         self.metadata = dict(metadata or {})
         self.git_available = git_available
-        self._cfg = agent.config
+        self._cfg = _config or agent.config.fork_for_session()
         self._force_compact = False
         self._pending_act_checkpoint = False
         self._pending_skills: list[str] = []
@@ -286,6 +289,31 @@ class Session:
     def app(self):
         """The compiled langgraph application for this session."""
         return self._app
+
+    @property
+    def config(self):
+        """The effective, session-owned configuration snapshot."""
+        return self._cfg
+
+    @property
+    def cost_tracker(self):
+        """Usage accumulated for this session/thread."""
+        return self._cfg.cost_tracker
+
+    def configure_models(
+        self,
+        *,
+        model: BaseChatModel,
+        reflection_model: BaseChatModel | None,
+        context_window: int | None,
+        vision: bool | None,
+    ) -> None:
+        """Replace this session's effective models and rebuild its graph."""
+        self._cfg.model = model
+        self._cfg.reflection_model = reflection_model
+        self._cfg.options.context_window = context_window
+        self._vision = vision
+        self._app = self._build_graph()
 
     def rebuild_graph(self) -> None:
         """Recompile the langgraph application (e.g. after config changes)."""

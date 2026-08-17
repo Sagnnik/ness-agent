@@ -1,6 +1,6 @@
 from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import uuid
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -30,6 +30,8 @@ if TYPE_CHECKING:
         InterruptHandler,
         PlanTurnHandler,
     )
+
+_UNSET = object()
 
 
 def _require_instance(name: str, value: object, expected: type) -> None:
@@ -221,6 +223,23 @@ class NessAgentConfig:
     cost_tracker: CostTracker
     tracer: Tracer
 
+    def fork_for_session(self) -> "NessAgentConfig":
+        """Create an effective config with session-local mutable services.
+
+        Project services remain shared by identity. The returned object has
+        the same shape as the resolved agent config so graph construction does
+        not need a parallel configuration hierarchy.
+
+        
+        """
+        return replace(
+            self,
+            options=replace(self.options),  # mutates the options for a single session
+            permission_store=self.permission_store.fork_for_session(), # new permission store; still shares the permission.json + lock
+            tool_registry=self.tool_registry.fork_for_session(),  # own MCP activation / include filter; shares tool catalog
+            cost_tracker=self.cost_tracker.fork_for_session(),   # Empty per session totals; shares pricing; rolls usage upto the agent aggregate.
+        )
+
     @classmethod
     def resolve(cls, spec: AgentSpec) -> "NessAgentConfig":
         """Resolve a user-facing :class:`AgentSpec` into a ready-to-run config.
@@ -354,7 +373,7 @@ class NessAgentConfig:
 
 
 class NessAgent:
-    """Top-level agent — owns a shared config and creates per-thread sessions.
+    """Top-level project agent with defaults inherited by per-thread sessions.
 
     This is the primary entry point for the Ness Agent SDK. Construct
     one with a model and prompt, then call ``.session(thread_id=...)``
@@ -436,6 +455,8 @@ class NessAgent:
         vision: bool | None = None,
         on_plan_turn: "PlanTurnHandler | None" = None,
         on_interrupt: "InterruptHandler | None" = None,
+        model: BaseChatModel | None = None,
+        reflection_model: BaseChatModel | None | object = _UNSET,
     ) -> Session:
         """Create a runnable :class:`~ness_agent.session.Session` for one thread.
 
@@ -463,10 +484,18 @@ class NessAgent:
             (not the shared :class:`NessAgentConfig`) so concurrent threads on
             one agent never clobber each other. See :mod:`ness_agent.types`
             for the handler signatures.
+        model, reflection_model
+            Optional effective-model overrides applied to this session's
+            config fork before its graph is compiled. Omitting either inherits
+            the corresponding agent default.
         """
         from ness_agent.session import Session
 
-        cfg = self._config
+        cfg = self._config.fork_for_session()
+        if model is not None:
+            cfg.model = model
+        if reflection_model is not _UNSET:
+            cfg.reflection_model = reflection_model  # type: ignore[assignment]
         mode = mode or (cfg.modes.default if cfg.modes else "act")
         return Session(
             self,
@@ -477,7 +506,20 @@ class NessAgent:
             vision=vision,
             on_plan_turn=on_plan_turn,
             on_interrupt=on_interrupt,
+            _config=cfg,
         )
+
+    def configure_default_models(
+        self,
+        *,
+        model: BaseChatModel,
+        reflection_model: BaseChatModel | None,
+        context_window: int | None,
+    ) -> None:
+        """Update defaults inherited by sessions created in the future."""
+        self._config.model = model
+        self._config.reflection_model = reflection_model
+        self._config.options.context_window = context_window
 
     def new_thread_id(self, prefix: str = "session") -> str:
         """Generate a fresh thread ID string.

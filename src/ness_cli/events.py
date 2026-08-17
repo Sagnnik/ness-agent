@@ -197,13 +197,12 @@ def events_to_messages(
 def restore_cost_from_events(events: list[dict], cost_tracker: Any) -> None:
     """Replay usage events into a CostTracker so totals continue after resume.
 
-    The CLI kept a process-global cost tracker; the SDK adapter threads the
-    session's own :class:`~ness_agent.tracing.cost.CostTracker` so a fresh
-    resume in a different process picks up where the persisted events left
-    off. Writing into a shared cost tracker is the one sanctioned mutable-seam;
-    the ``conv_events_to_messages`` path above does not mutate anything.
+    The SDK adapter restores the session's own
+    :class:`~ness_agent.tracing.cost.CostTracker` so a fresh resume picks up
+    where the persisted events left off. Restoration deliberately bypasses
+    the agent's live aggregate: replaying history is not new provider spend.
 
-    Each persisted usage row is fed back through :meth:`CostTracker.add` with
+    Each persisted usage row is fed back through :meth:`CostTracker.restore` with
     the recorded token counts (``cache_read`` via ``input_token_details``) and
     the recorded cost passed as provider metadata, so the replayed totals
     reproduce the persisted ones exactly rather than being re-estimated.
@@ -216,9 +215,13 @@ def restore_cost_from_events(events: list[dict], cost_tracker: Any) -> None:
             "input_tokens": int(event.get("input_tokens", 0) or 0),
             "output_tokens": int(event.get("output_tokens", 0) or 0),
             "input_token_details": {
-                "cache_read": int(event.get("cached_input_tokens", 0) or 0)
+                "cache_read": int(event.get("cached_input_tokens", 0) or 0),
+                "cache_creation": int(
+                    event.get("cache_write_input_tokens", 0) or 0
+                ),
             },
         }
         recorded_cost = float(event.get("cost_usd", 0.0) or 0.0)
         metadata = {"cost": recorded_cost} if recorded_cost > 0 else {}
-        cost_tracker.add(usage, model, metadata)
+        restore = getattr(cost_tracker, "restore", cost_tracker.add)
+        restore(usage, model, metadata)

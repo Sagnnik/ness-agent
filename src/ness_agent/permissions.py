@@ -1,5 +1,10 @@
 from __future__ import annotations
-import fnmatch, json
+
+import fnmatch
+import json
+import os
+import tempfile
+import threading
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
@@ -43,7 +48,13 @@ DEFAULT_RULES = {
 }
 
 class PermissionStore:
-    def __init__(self, *, ness_dir: Path = Path(".ness"), project_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ness_dir: Path = Path(".ness"),
+        project_root: Path | None = None,
+        _persistent_lock: threading.RLock | None = None,
+    ) -> None:
         """Store and evaluate tool-permission rules loaded from ``<ness_dir>/permissions.json``.
 
         Args:
@@ -55,6 +66,20 @@ class PermissionStore:
         self.permissions_file = self.ness_dir / "permissions.json"
         self.project_root = (project_root or Path.cwd()).resolve()
         self._session_rules: dict[str, list[str]] = {"allow": [], "deny": []}
+        self._persistent_lock = _persistent_lock or threading.RLock()
+
+    def fork_for_session(self) -> "PermissionStore":
+        """Create a project-backed view with independent temporary rules."""
+        fork = PermissionStore(
+            ness_dir=self.ness_dir,
+            project_root=self.project_root,
+            _persistent_lock=self._persistent_lock,
+        )
+        fork._session_rules = {
+            "allow": list(self._session_rules["allow"]),
+            "deny": list(self._session_rules["deny"]),
+        }
+        return fork
 
     def validate_path(self, path: str) -> str:
         """Resolve *path* to an absolute path and verify it lies under ``project_root``.
@@ -134,22 +159,39 @@ class PermissionStore:
         self._session_rules["deny"].clear()
 
     def _load(self) -> dict:
-        if not self.permissions_file.exists():
-            self.ness_dir.mkdir(parents=True, exist_ok=True)
-            self._save(DEFAULT_RULES)
-            return json.loads(json.dumps(DEFAULT_RULES))
-        try:
-            data = json.loads(self.permissions_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            data = {}
-        for key in ("allow", "deny", "ask"):
-            data.setdefault(key, [])
-        return data
+        with self._persistent_lock:
+            if not self.permissions_file.exists():
+                self.ness_dir.mkdir(parents=True, exist_ok=True)
+                self._save(DEFAULT_RULES)
+                return json.loads(json.dumps(DEFAULT_RULES))
+            try:
+                data = json.loads(self.permissions_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+            for key in ("allow", "deny", "ask"):
+                data.setdefault(key, [])
+            return data
 
 
     def _save(self, rules: dict) -> None:
-        self.ness_dir.mkdir(parents=True, exist_ok=True)
-        self.permissions_file.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+        with self._persistent_lock:
+            self.ness_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self.ness_dir,
+                prefix=self.permissions_file.name,
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(rules, handle, indent=2)
+                    handle.write("\n")
+                os.replace(tmp_name, self.permissions_file)
+            except BaseException:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
 
     def remove_rule(self, bucket: Literal["allow", "deny"], index: int) -> str:
         """Remove a persisted rule at *index* from the given *bucket*.
@@ -159,13 +201,14 @@ class PermissionStore:
         Raises:
             ValueError: If *index* is out of range for that bucket.
         """
-        rules = self._load()
-        try:
-            removed = rules.get(bucket, []).pop(index)
-        except IndexError as exc:
-            raise ValueError(f"No {bucket} rule at index {index}") from exc
-        self._save(rules)
-        return removed
+        with self._persistent_lock:
+            rules = self._load()
+            try:
+                removed = rules.get(bucket, []).pop(index)
+            except IndexError as exc:
+                raise ValueError(f"No {bucket} rule at index {index}") from exc
+            self._save(rules)
+            return removed
 
     def list_rules(self) -> str:
         """Return the full ruleset as a pretty-printed JSON string (read from disk)."""
@@ -265,11 +308,12 @@ class PermissionStore:
             if rule not in self._session_rules[bucket]:
                 self._session_rules[bucket].append(rule)
             return
-        rules = self._load()
-        rules.setdefault(bucket, [])
-        if rule not in rules[bucket]:
-            rules[bucket].append(rule)
-        self._save(rules)
+        with self._persistent_lock:
+            rules = self._load()
+            rules.setdefault(bucket, [])
+            if rule not in rules[bucket]:
+                rules[bucket].append(rule)
+            self._save(rules)
 
     def _has_unquoted_shell_operators(self, command: str) -> bool:
         """Return True when command contains unquoted shell chaining or substitution."""

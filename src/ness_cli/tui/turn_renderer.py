@@ -182,7 +182,13 @@ class TurnRenderer:
     def _accumulate_usage(self, data: dict[str, Any]) -> None:
         acc = self.usage
         acc["model"] = data.get("model") or acc.get("model")
-        for key in ("input_tokens", "uncached_input_tokens", "cached_input_tokens", "output_tokens"):
+        for key in (
+            "input_tokens",
+            "uncached_input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "output_tokens",
+        ):
             acc[key] = int(acc.get(key) or 0) + int(data.get(key) or 0)
         cost = data.get("cost_usd")
         if cost:

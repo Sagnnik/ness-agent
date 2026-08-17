@@ -19,7 +19,6 @@ from prompt_toolkit.styles import Style
 
 from ness_agent.types import SessionEvent
 from ness_agent.reflection import ReflectionResult
-from ness_cli.chat_model import active_model_name
 from ness_cli.config import settings
 
 from ness_cli.tui import render
@@ -797,7 +796,7 @@ class TuiApp(TranscriptMixin, ChromeMixin, MenuMixin, ConfigFlowMixin, PromptMix
     @property
     def model(self):
         """The raw chat model (used by /memory create's one-shot NESS.md draft)."""
-        return self.coding.agent.config.model
+        return self.coding.cfg.model
 
     def toggle_mode(self) -> None:
         self.coding.toggle_mode()
@@ -806,7 +805,7 @@ class TuiApp(TranscriptMixin, ChromeMixin, MenuMixin, ConfigFlowMixin, PromptMix
         options = getattr(getattr(self.coding, "cfg", None), "options", None)
         render.render_header(
             mode=self.coding.mode,
-            model=active_model_name(),
+            model=self.coding.model_name,
             approval=getattr(options, "enable_approval", settings.enable_approval),
             yolo=getattr(options, "yolo_mode", False),
             autosave=settings.auto_save_threads,

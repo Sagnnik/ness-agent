@@ -501,6 +501,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                         input_tokens=usage.input_tokens,
                         uncached_input_tokens=usage.uncached_input_tokens,
                         cached_input_tokens=usage.cached_input_tokens,
+                        cache_write_input_tokens=usage.cache_write_input_tokens,
                         output_tokens=usage.output_tokens,
                         cost_usd=usage.cost_usd,
                     ))
