@@ -16,12 +16,13 @@ from ness_cli.provider.codex.transport import CodexResponsesTransport
 
 
 class CodexSubscriptionChatModel(BaseChatModel):
-    """LangChain model using credentials managed by the Codex CLI subscription flow."""
+    """LangChain model using ChatGPT credentials managed by Codex app-server."""
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
     model_name: str = Field(alias="model")
     reasoning_effort: str | None = None
+    prompt_cache_key: str | None = None
     max_retries: int = 3
     _auth: CodexAuth = PrivateAttr()
     _transport: CodexResponsesTransport = PrivateAttr()
@@ -43,7 +44,11 @@ class CodexSubscriptionChatModel(BaseChatModel):
 
     @property
     def _identifying_params(self) -> dict[str, Any]:
-        return {"model": self.model_name, "billing_mode": "subscription"}
+        return {
+            "model": self.model_name,
+            "billing_mode": "subscription",
+            "prompt_cache_key": self.prompt_cache_key,
+        }
 
     def bind_tool_registry(self, registry: Any) -> BaseChatModel:
         # make a deep copy of codex subscription chat model; avoid modifying the original instance
@@ -146,6 +151,11 @@ class CodexSubscriptionChatModel(BaseChatModel):
             "store": False,
             "parallel_tool_calls": True,
         }
+        if self.prompt_cache_key:
+            # The key must remain stable for all requests that share a
+            # conversation prefix. The adapter scopes it to one thread (and
+            # to auxiliary model roles such as reflection).
+            payload["prompt_cache_key"] = self.prompt_cache_key
         if tools:
             payload["tools"] = tools
             tool_choice = kwargs.pop("tool_choice", "auto")
@@ -202,6 +212,17 @@ class CodexSubscriptionChatModel(BaseChatModel):
         details = usage.get("input_tokens_details") or {}
         input_tokens = int(usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("output_tokens") or 0)
+        cache_read = int(details.get("cached_tokens") or 0)
+        cache_write = int(details.get("cache_write_tokens") or 0)
+        cache_diagnostics = response.get("_cache_diagnostics")
+        response_metadata: dict[str, Any] = {
+            "model_name": response.get("model") or "",
+            "response_id": response.get("id"),
+            "billing_mode": "subscription",
+            "cache_write_tokens": cache_write,
+        }
+        if isinstance(cache_diagnostics, dict):
+            response_metadata["cache_diagnostics"] = dict(cache_diagnostics)
         return AIMessage(
             content="".join(text),
             tool_calls=tool_calls,
@@ -210,13 +231,12 @@ class CodexSubscriptionChatModel(BaseChatModel):
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": int(usage.get("total_tokens") or input_tokens + output_tokens),
-                "input_token_details": {"cache_read": int(details.get("cached_tokens") or 0)},
+                "input_token_details": {
+                    "cache_read": cache_read,
+                    "cache_creation": cache_write,
+                },
             },
-            response_metadata={
-                "model_name": response.get("model") or "",
-                "response_id": response.get("id"),
-                "billing_mode": "subscription",
-            },
+            response_metadata=response_metadata,
         )
 
     async def _agenerate(

@@ -1,6 +1,6 @@
 # Ness CLI
 
-**Ness** is the interactive coding-agent CLI shipped with Ness Agent. It supports Codex subscription and OpenRouter models, plan/act modes, filesystem-driven extension points under `.ness/`, and a full TUI for approvals, thread history, and configuration.
+**Ness** is the interactive coding-agent CLI shipped with Ness Agent. It supports plan/act modes, filesystem-driven extension points under `.ness/`, and a full TUI for approvals, thread history, and configuration.
 
 See also: [Configuration](configuration.md) · [Architecture](architecture.md) · [SDK](sdk.md)
 
@@ -24,8 +24,8 @@ ness
 
 `/init` creates project `.ness/` (dirs, permissions, hooks, mcp, default agent profiles, empty `NESS.md`) and ensures global config (`USER.md`, `instructions/`, `plans/<slug>/`).
 
-Or skip the env var and run `/login`. Choose Codex subscription for managed
-browser/device authentication, or OpenRouter for a masked API-key prompt. Device-code
+Or skip the env var and run `/login`. Choose Codex to sign in with ChatGPT
+using managed browser/device authentication, or OpenRouter for a masked API-key prompt. Device-code
 login must first be enabled in ChatGPT **Settings > Security** by turning on
 **Device code authorization for Codex**; browser login does not require that setting.
 Selecting a connected provider makes it active and exposes only **Reconnect** and

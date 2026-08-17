@@ -56,18 +56,18 @@ const RELEASES: readonly Release[] = [
   },
   {
     slug: 'codex-provider-and-login',
-    title: 'Codex subscription, /login, and install scripts',
+    title: 'Codex ChatGPT sign-in, /login, and install scripts',
     date: '2026-08-12',
     version: 'v0.2.1',
     summary:
-      'Sign in with a Codex subscription or OpenRouter key, switch providers in-session, and install Ness from curl or PowerShell.',
+      'Sign in to Codex with ChatGPT or use an OpenRouter key, switch providers in-session, and install Ness from curl or PowerShell.',
     sectionLabel: '00.2.1 // ADDED',
     intro:
-      '0.2.1 adds a pluggable provider layer with first-class Codex subscription auth, refreshes the TUI around /login and /status, and ships cross-platform install scripts. One database schema change requires action before upgrading.',
+      "0.2.1 adds a pluggable provider layer with Codex authentication through ChatGPT's managed sign-in flow, refreshes the TUI around /login and /status, and ships cross-platform install scripts. The Codex model transport remains experimental. One database schema change requires action before upgrading.",
     highlights: [
       [
-        'Codex provider',
-        '/login connects a Codex subscription through the installed codex CLI app-server; credentials stay in Ness global config and never touch ~/.codex.',
+        'Experimental Codex integration',
+        '/login authenticates Codex through the installed codex CLI app-server; credentials stay in Ness global config and never touch ~/.codex. Ness uses a separate experimental Codex Responses transport for inference.',
       ],
       [
         'Provider picker',

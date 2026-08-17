@@ -55,10 +55,10 @@ class CodexAuth:
         result = await self.server.request("account/read", {"refreshToken": True})
         account = result.get("account")
         if not isinstance(account, dict) or account.get("type") != "chatgpt":
-            raise RuntimeError("Codex subscription authentication is required; run /login.")
+            raise RuntimeError("Codex ChatGPT authentication is required; run /login.")
         credentials = self.credentials() # edge case: codex says signed in but auth.json is not present
         if credentials is None:
-            raise RuntimeError("Codex did not persist subscription credentials.")
+            raise RuntimeError("Codex did not persist ChatGPT credentials.")
         try:
             os.chmod(self.auth_path, 0o600)
         except OSError:

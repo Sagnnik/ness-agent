@@ -4,13 +4,14 @@ import base64
 import asyncio
 import json
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from ness_cli.config import AVAILABLE_MODELS, settings
 from ness_cli.provider.codex.adapter import CodexProviderAdapter
@@ -105,6 +106,40 @@ def test_codex_chat_model_preserves_function_call_history():
     assert items[2]["type"] == "function_call_output"
 
 
+def test_codex_prompt_cache_key_is_stable_and_thread_scoped():
+    adapter = CodexProviderAdapter()
+    model = adapter.build_chat_model(
+        "thread-123",
+        model_name="gpt-5.5-codex",
+        reasoning_effort="high",
+    )
+
+    cache_key = str(model.prompt_cache_key)
+    assert str(uuid.UUID(cache_key)) == cache_key
+    payload = model._payload([HumanMessage(content="inspect")])  # type: ignore[attr-defined]
+    assert payload["prompt_cache_key"] == cache_key
+    assert "prompt_cache_options" not in payload
+
+
+def test_codex_subscription_payload_omits_public_cache_controls():
+    model = CodexSubscriptionChatModel(
+        model="gpt-5.6-codex",
+        prompt_cache_key="ness-agent:thread-123",
+    )
+    payload = model._payload(
+        [
+            SystemMessage(content="stable instructions"),
+            HumanMessage(content="inspect"),
+        ]
+    )
+
+    assert payload["prompt_cache_key"] == "ness-agent:thread-123"
+    assert "prompt_cache_options" not in payload
+    assert payload["instructions"] == "stable instructions"
+    assert payload["input"][0]["role"] == "user"
+    assert "prompt_cache_breakpoint" not in json.dumps(payload)
+
+
 def test_codex_response_maps_usage_tools_and_subscription_billing():
     message = CodexSubscriptionChatModel._message(
         {
@@ -125,7 +160,10 @@ def test_codex_response_maps_usage_tools_and_subscription_billing():
             "usage": {
                 "input_tokens": 10,
                 "output_tokens": 4,
-                "input_tokens_details": {"cached_tokens": 3},
+                "input_tokens_details": {
+                    "cached_tokens": 3,
+                    "cache_write_tokens": 6,
+                },
             },
         }
     )
@@ -133,6 +171,8 @@ def test_codex_response_maps_usage_tools_and_subscription_billing():
     assert message.content == "checking"
     assert message.tool_calls[0]["args"] == {"path": "a.py"}
     assert message.usage_metadata["input_token_details"]["cache_read"] == 3
+    assert message.usage_metadata["input_token_details"]["cache_creation"] == 6
+    assert message.response_metadata["cache_write_tokens"] == 6
     assert message.response_metadata["billing_mode"] == "subscription"
 
 
@@ -354,6 +394,74 @@ def test_codex_transport_does_not_retry_non_transient_stream_error(monkeypatch):
 
     assert calls == 1
     sleep.assert_not_awaited()
+
+
+def test_codex_transport_surfaces_backend_400_detail(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"x-request-id": "req-cache-400"},
+            json={"detail": "Unsupported parameter: prompt_cache_options"},
+        )
+
+    _patch_transport_client(monkeypatch, handler)
+    transport = CodexResponsesTransport(_TransportAuth(), max_retries=3)  # type: ignore[arg-type]
+
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        asyncio.run(transport.create({"model": "gpt-test"}))
+
+    message = str(caught.value)
+    assert "Unsupported parameter: prompt_cache_options" in message
+    assert "req-cache-400" in message
+
+
+def test_codex_transport_reports_append_only_cache_prefix(monkeypatch):
+    session_headers: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        session_headers.append(request.headers.get("session_id"))
+        return httpx.Response(
+            200,
+            text=_sse(
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp-ok", "output": []},
+                }
+            ),
+        )
+
+    _patch_transport_client(monkeypatch, handler)
+    transport = CodexResponsesTransport(_TransportAuth())  # type: ignore[arg-type]
+    base = {
+        "model": "gpt-test",
+        "instructions": "stable",
+        "tools": [{"type": "function", "name": "read"}],
+        "prompt_cache_key": "ness-agent:thread-1",
+    }
+    first = asyncio.run(
+        transport.create(
+            {**base, "input": [{"role": "user", "content": "first"}]}
+        )
+    )
+    second = asyncio.run(
+        transport.create(
+            {
+                **base,
+                "input": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": "answer"},
+                    {"role": "user", "content": "second"},
+                ],
+            }
+        )
+    )
+
+    assert first["_cache_diagnostics"]["has_previous_request"] is False
+    diagnostics = second["_cache_diagnostics"]
+    assert diagnostics["stable_configuration"] is True
+    assert diagnostics["append_only_prefix"] is True
+    assert diagnostics["matching_input_items"] == 1
+    assert session_headers == ["ness-agent:thread-1", "ness-agent:thread-1"]
 
 
 def test_login_readiness_waits_for_account_state(tmp_path: Path, monkeypatch):

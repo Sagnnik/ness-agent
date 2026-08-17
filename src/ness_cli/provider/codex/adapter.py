@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from dataclasses import dataclass
 import time
+import uuid
 from langchain_core.language_models import BaseChatModel
 
 from ness_cli.config import settings
@@ -29,8 +30,8 @@ class StatusCache:
 
 class CodexProviderAdapter(ProviderAdapter):
     id = "codex"
-    display_name = "Codex subscription"
-    login_description = "ChatGPT subscription"
+    display_name = "Codex (ChatGPT)"
+    login_description = "Sign in with ChatGPT"
     selection_priority = 10
     billing_label = "subscription"
 
@@ -57,10 +58,16 @@ class CodexProviderAdapter(ProviderAdapter):
         reasoning_effort: str | None,
         session_suffix: str = "",
     ) -> BaseChatModel:
-        del thread_id, session_suffix
+        cache_identity = f"ness-agent:{thread_id}:{session_suffix or 'main'}"
+        # The first-party Codex client uses its UUID session identity for both
+        # cache affinity and private-backend routing. Ness thread IDs are not
+        # UUIDs, so derive a stable UUID without exposing prompt content or 
+        # relying on process-local state.
+        cache_key = str(uuid.uuid5(uuid.NAMESPACE_URL, cache_identity))
         return CodexSubscriptionChatModel(
             model=model_name,
             reasoning_effort=reasoning_effort,
+            prompt_cache_key=cache_key,
             max_retries=settings.api_max_retries,
             auth=self.auth,
         )
@@ -137,7 +144,7 @@ class CodexProviderAdapter(ProviderAdapter):
             # and auth.json converge. Do not force-refresh a brand-new token.
             await self.auth.wait_until_ready()
             self._status_cache = None
-            return LoginResult("complete", "Signed in with your Codex subscription.")
+            return LoginResult("complete", "Signed in to Codex with ChatGPT.")
         return LoginResult("error", self._login_error(params.get("error")))
 
     async def cancel_login(self, login_id: str) -> None:
@@ -150,7 +157,7 @@ class CodexProviderAdapter(ProviderAdapter):
         await self.server.start()
         await self.server.request("account/logout", {})
         self._models = ()
-        return "Signed out of Codex subscription."
+        return "Signed out of Codex."
 
     async def status(self, *, refresh: bool = False) -> ProviderStatus:
         if not self.is_authenticated():

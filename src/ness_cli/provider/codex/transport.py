@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import math
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -11,6 +13,8 @@ from typing import Any
 import httpx
 
 from ness_cli.provider.codex.auth import CodexAuth
+
+logger = logging.getLogger(__name__)
 
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 _MAX_BACKOFF_SECONDS = 8.0
@@ -45,6 +49,116 @@ class CodexStreamError(RuntimeError):
 
 async def _sleep(delay: float) -> None:
     await asyncio.sleep(delay)
+
+
+def _json_hash(value: Any) -> str:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(rendered).hexdigest()
+
+
+def _cache_snapshot(payload: dict[str, Any]) -> dict[str, Any] | None:
+    cache_key = str(payload.get("prompt_cache_key") or "")
+    if not cache_key:
+        return None
+    items = payload.get("input") or []
+    return {
+        "cache_key_hash": hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:12],
+        "model": str(payload.get("model") or ""),
+        "instructions_hash": _json_hash(payload.get("instructions") or ""),
+        "tools_hash": _json_hash(payload.get("tools") or []),
+        "input_item_hashes": tuple(_json_hash(item) for item in items),
+    }
+
+
+def _compare_cache_snapshots(
+    current: dict[str, Any] | None,
+    previous: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if current is None:
+        return None
+    current_items = current["input_item_hashes"]
+    diagnostics: dict[str, Any] = {
+        "cache_key_hash": current["cache_key_hash"],
+        "current_input_items": len(current_items),
+        "has_previous_request": previous is not None,
+    }
+    if previous is None:
+        return diagnostics
+
+    previous_items = previous["input_item_hashes"]
+    matching_items = 0
+    for old, new in zip(previous_items, current_items):
+        if old != new:
+            break
+        matching_items += 1
+    stable_configuration = (
+        previous["model"] == current["model"]
+        and previous["instructions_hash"] == current["instructions_hash"]
+        and previous["tools_hash"] == current["tools_hash"]
+    )
+    diagnostics.update(
+        {
+            "prior_input_items": len(previous_items),
+            "matching_input_items": matching_items,
+            "stable_configuration": stable_configuration,
+            "append_only_prefix": (
+                stable_configuration and matching_items == len(previous_items)
+            ),
+        }
+    )
+    if matching_items < len(previous_items):
+        diagnostics["first_mismatch_item"] = matching_items
+    return diagnostics
+
+
+def _error_detail(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    detail: Any = None
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        error = payload.get("error")
+        if detail is None and isinstance(error, dict):
+            detail = error.get("message") or error.get("detail")
+        if detail is None and error is not None:
+            detail = error
+    if detail is None:
+        detail = response.text.strip()
+    if not detail:
+        return None
+    if not isinstance(detail, str):
+        detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+    return detail[:2_000]
+
+
+async def _raise_for_status(response: httpx.Response) -> None:
+    if response.is_success:
+        return
+    await response.aread()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        parts = [str(exc)]
+        detail = _error_detail(response)
+        if detail:
+            parts.append(f"Backend detail: {detail}")
+        request_id = response.headers.get("x-request-id") or response.headers.get(
+            "x-oai-request-id"
+        )
+        if request_id:
+            parts.append(f"Request ID: {request_id}")
+        raise httpx.HTTPStatusError(
+            "\n".join(parts),
+            request=response.request,
+            response=response,
+        ) from exc
 
 
 def _retry_after_seconds(headers: httpx.Headers) -> float | None:
@@ -129,8 +243,17 @@ class CodexResponsesTransport:
         self.auth = auth
         self.max_retries = max_retries
         self.timeout = timeout
+        self._cache_snapshots: dict[str, dict[str, Any]] = {}
 
     async def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot = _cache_snapshot(payload)
+        snapshot_key = snapshot["cache_key_hash"] if snapshot is not None else None
+        previous_snapshot = (
+            self._cache_snapshots.get(snapshot_key) if snapshot_key is not None else None
+        )
+        cache_diagnostics = _compare_cache_snapshots(snapshot, previous_snapshot)
+        if cache_diagnostics is not None:
+            logger.debug("Codex cache prefix diagnostics: %s", cache_diagnostics)
         refreshed_401 = False  # needs auth refresh
         retry_attempt = 0  # retry up to max_retries times
         while True:
@@ -143,6 +266,12 @@ class CodexResponsesTransport:
                 "OpenAI-Beta": "responses=experimental",  # extra header for experimental features
                 "originator": "ness-agent",
             }
+            cache_session_id = str(payload.get("prompt_cache_key") or "")
+            if cache_session_id:
+                # Match the stable session-routing header used by the
+                # first-party Codex client. Keep it identical to the body key
+                # so the private backend sees one cache/session identity.
+                headers["session_id"] = cache_session_id
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     # stream from the Codex Responses URL
@@ -159,7 +288,7 @@ class CodexResponsesTransport:
                             await self.auth.valid_credentials(force_refresh=True)
                             continue
 
-                        response.raise_for_status()
+                        await _raise_for_status(response)
                         completed: dict[str, Any] | None = None
                         output: list[dict[str, Any]] = []
                         text_parts: list[str] = []
@@ -199,9 +328,14 @@ class CodexResponsesTransport:
                             # error: HTTP is 200 but un-successful LLM response
                             elif kind in {"response.failed", "error"}:
                                 raise _stream_error(event, response.headers)
-                        return merge_streamed_response(
+                        merged = merge_streamed_response(
                             completed, output, text_parts
                         )  # combine all of them into one complete response
+                        if snapshot_key is not None and snapshot is not None:
+                            self._cache_snapshots[snapshot_key] = snapshot
+                        if cache_diagnostics is not None:
+                            merged["_cache_diagnostics"] = cache_diagnostics
+                        return merged
 
             except (
                 CodexStreamError,

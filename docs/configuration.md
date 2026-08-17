@@ -68,9 +68,10 @@ Project `.env` files are not loaded or migrated for Ness application settings. E
 Use `/login` to authenticate, activate, reconnect, or log out of a model provider.
 Selecting a connected provider activates it and opens its Reconnect/Log out menu;
 selecting a disconnected provider starts authentication without an extra Connect step.
-OpenRouter keys are stored in `secrets.json`. Codex subscription credentials
-are managed by the system `codex` CLI under `<NESS_AGENT_CONFIG_DIR>/codex/`
-with file credential storage forced; Ness does not reuse `~/.codex`.
+OpenRouter keys are stored in `secrets.json`. ChatGPT credentials for Codex
+are managed by the system `codex` CLI app-server under
+`<NESS_AGENT_CONFIG_DIR>/codex/` with file credential storage forced; Ness
+does not reuse `~/.codex`.
 Codex device-code login additionally requires **Device code authorization for
 Codex** to be enabled in ChatGPT **Settings > Security**. Use browser login if
 that account setting is unavailable.
@@ -129,9 +130,4 @@ advanced options; provider-only fields are hidden when they do not apply.
 
 The `/config` model picker reads the active provider's catalog. OpenRouter's
 global disk cache is reused for 24 hours with a packaged offline fallback;
-Codex models are supplied by `codex app-server` for the signed-in account.
-
-Codex access tokens are refreshed through `account/read` shortly before JWT
-expiry and once after an HTTP 401. Network, rate-limit, and server failures do
-not trigger credential refresh. The subscription Responses transport is kept
-inside `src/ness_cli/provider/codex/` because that endpoint is experimental.
+`codex app-server` handles ChatGPT authentication and credential management for the signed-in account. Ness performs model inference separately through its experimental ChatGPT-authenticated Codex Responses transport.
