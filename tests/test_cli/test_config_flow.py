@@ -12,7 +12,10 @@ from ness_cli.config import settings
 from ness_cli.config_store import load_configs, load_secrets
 from ness_cli.provider.openrouter.catalog import RefreshResult
 from ness_cli.tui.config_flow import current_config_lines
-from ness_cli.tui.config_registry import SPEC_BY_KEY
+from ness_cli.tui.config_registry import (
+    CONFIG_SECTIONS,
+    specs_for_section,
+)
 
 
 @pytest.fixture
@@ -226,5 +229,10 @@ def test_current_config_lines_cover_all_sections():
     text = "\n".join(current_config_lines())
     for title in ("Provider:", "Model:", "Behavior:", "Compaction:", "Advanced:"):
         assert title in text
-    for key in SPEC_BY_KEY:
+    visible_keys = {
+        spec.key
+        for section, _title in CONFIG_SECTIONS
+        for spec in specs_for_section(section)
+    }
+    for key in visible_keys:
         assert key in text

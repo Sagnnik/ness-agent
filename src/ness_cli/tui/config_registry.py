@@ -24,7 +24,7 @@ CONFIG_SECTIONS: tuple[tuple[str, str], ...] = (
 )
 
 SECTION_DESCRIPTIONS: dict[str, str] = {
-    "provider": "api key, base url, exa, session id, cache ttl",
+    "provider": "provider credentials, exa, endpoint and cache options",
     "model": "chat model, reasoning, reflection, judge",
     "behavior": "approval, autosave, reflection, formatting",
     "compaction": "budget, reserves, ratio",
@@ -57,6 +57,15 @@ CONFIG_SPECS: tuple[ConfigSpec, ...] = (
         "provider",
         "secret",
         example="e.g. sk-or-v1-...",
+        secret=True,
+        rebuild=True,
+    ),
+    ConfigSpec(
+        "opencode_api_key",
+        "OpenCode Go API key",
+        "provider",
+        "secret",
+        example="e.g. sk-...",
         secret=True,
         rebuild=True,
     ),
@@ -184,15 +193,18 @@ SECRET_FORM_KINDS: frozenset[str] = frozenset(
 
 def specs_for_section(section: str) -> list[ConfigSpec]:
     specs = [spec for spec in CONFIG_SPECS if spec.section == section]
-    if settings.model_provider == "codex":
-        openrouter_only = {
-            "openai_api_key",
-            "openai_base_url",
-            "openrouter_session_id",
-            "openrouter_cache_ttl",
-            "openrouter_anthropic_messages",
-        }
+    openrouter_only = {
+        "openai_api_key",
+        "openai_base_url",
+        "openrouter_session_id",
+        "openrouter_cache_ttl",
+        "openrouter_anthropic_messages",
+    }
+    opencode_only = {"opencode_api_key"}
+    if settings.model_provider != "openrouter":
         specs = [spec for spec in specs if spec.key not in openrouter_only]
+    if settings.model_provider != "opencode":
+        specs = [spec for spec in specs if spec.key not in opencode_only]
     return specs
 
 

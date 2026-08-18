@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import cast
 
 from langchain_core.language_models import BaseChatModel
-from langchain_openrouter import ChatOpenRouter  # compatibility patch point
+from langchain_openrouter import ChatOpenRouter  # noqa: F401  # compatibility patch point
 
 from ness_cli.config import (
     ReasoningEffort,
@@ -196,7 +196,7 @@ def create_reflection_model(thread_id: str) -> BaseChatModel:
     else:
         reflection_model = profile.get("reflection_model_name") or (
             active_model_name()
-            if settings.model_provider == "codex"
+            if settings.model_provider in {"codex", "opencode"}
             else _resolved_setting("reflection_model_name")
         )
     return build_chat_model(

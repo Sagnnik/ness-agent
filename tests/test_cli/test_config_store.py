@@ -108,6 +108,19 @@ def test_settings_reads_global_json(config_dir: Path, monkeypatch):
     assert fresh.openai_api_key == "sk-json"
 
 
+def test_settings_reads_opencode_key_aliases_and_saved_secret(
+    config_dir: Path, monkeypatch
+):
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    write_secret("opencode_api_key", "sk-json-go")
+    from ness_cli.config import Settings
+
+    assert Settings().opencode_api_key == "sk-json-go"
+    monkeypatch.setenv("OPENCODE_API_KEY", "sk-env-go")
+    assert Settings().opencode_api_key == "sk-env-go"
+
+
 def test_settings_env_overrides_json(config_dir: Path, monkeypatch):
     write_config("model_name", "openai/gpt-4o")
     monkeypatch.setenv("MODEL_NAME", "deepseek/deepseek-chat")

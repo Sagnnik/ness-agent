@@ -23,7 +23,9 @@ from typing import Any, BinaryIO, Iterator
 from ness_cli.paths import config_dir_from_env
 
 # Settings field names routed to ``secrets.json`` instead of ``configs.json``.
-SECRET_KEYS: frozenset[str] = frozenset({"openai_api_key", "exa_api_key"})
+SECRET_KEYS: frozenset[str] = frozenset(
+    {"openai_api_key", "opencode_api_key", "exa_api_key"}
+)
 
 _CONFIGS_NAME = "configs.json"
 _SECRETS_NAME = "secrets.json"

@@ -444,6 +444,8 @@ def _window_label(minutes: int | None) -> str:
         return "5-hour"
     if minutes == 10_080:
         return "weekly"
+    if minutes == 43_200:
+        return "monthly"
     if minutes is None:
         return "unknown window"
     if minutes % 1_440 == 0:

@@ -68,7 +68,7 @@ Project `.env` files are not loaded or migrated for Ness application settings. E
 Use `/login` to authenticate, activate, reconnect, or log out of a model provider.
 Selecting a connected provider activates it and opens its Reconnect/Log out menu;
 selecting a disconnected provider starts authentication without an extra Connect step.
-OpenRouter keys are stored in `secrets.json`. ChatGPT credentials for Codex
+OpenRouter and OpenCode Go keys are stored separately in `secrets.json`. ChatGPT credentials for Codex
 are managed by the system `codex` CLI app-server under
 `<NESS_AGENT_CONFIG_DIR>/codex/` with file credential storage forced; Ness
 does not reuse `~/.codex`.
@@ -94,8 +94,8 @@ All except `NESS_DIR` are also editable via `/config` in the Ness TUI.
 
 | Variable | Description |
 |----------|-------------|
-| `MODEL_PROVIDER` | Active provider (`openrouter` by default, or `codex`) |
-| `MODEL_NAME` | Model passed to `ChatOpenRouter` (`deepseek/deepseek-v4-flash` by default) |
+| `MODEL_PROVIDER` | Active provider (`openrouter` by default, `codex`, or `opencode`) |
+| `MODEL_NAME` | Active provider model ID (`deepseek/deepseek-v4-flash` by default) |
 | `REFLECTION_MODEL_NAME` | Model for background session-memory reflection (defaults to `MODEL_NAME`) |
 | `ENABLE_APPROVAL` | Require approval for destructive tools |
 | `AUTO_SAVE_THREADS` | Write thread events to `.ness/threads/` |
@@ -112,6 +112,7 @@ All except `NESS_DIR` are also editable via `/config` in the Ness TUI.
 | `GOAL_MAX_ATTEMPTS` | Maximum worker/judge attempts for `/goal` (default `3`) |
 | `OPENAI_BASE_URL` | Optional custom OpenAI-compatible base URL |
 | `OPENAI_API_KEY` | Provider API key (also stored in `secrets.json` via `/config`) |
+| `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY` | OpenCode Go subscription key (also stored separately in `secrets.json`) |
 | `FORMAT_ON_WRITE` | Auto-format supported file types after writes (default `true`) |
 | `NESS_DIR` | Project config directory (default `.ness`) |
 | `NESS_AGENT_CONFIG_DIR` | Override global config root |

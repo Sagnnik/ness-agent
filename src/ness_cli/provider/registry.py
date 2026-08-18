@@ -18,10 +18,12 @@ def _register_builtins() -> None:
     if _builtins_registered:
         return
     from ness_cli.provider.codex.adapter import CodexProviderAdapter
+    from ness_cli.provider.opencode.adapter import OpenCodeProviderAdapter
     from ness_cli.provider.openrouter.adapter import OpenRouterProviderAdapter
 
     register_provider("openrouter", OpenRouterProviderAdapter)
     register_provider("codex", CodexProviderAdapter)
+    register_provider("opencode", OpenCodeProviderAdapter)
     _builtins_registered = True
 
 

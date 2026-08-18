@@ -36,7 +36,6 @@ Ness Agent is an experimental, hackable coding-agent harness for engineers who w
 | **Ness Agent SDK** | LangGraph agent loop, built-in tools, permissions, memory, skills, hooks, MCP, compaction, reflection, tracing |
 | **Ness CLI** | Terminal UI (`ness`), plan/act modes, git worktrees, global config, `.ness/` project layout |
 
-Both are included in the `ness-agent` PyPI package. OpenRouter-compatible chat models, native tool-calling, cache-safe summary compaction, and filesystem-driven extension points under `.ness/`.
 
 ## Installation
 

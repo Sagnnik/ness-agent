@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- OpenCode Go as a built-in CLI model provider, with per-model Responses, Chat Completions, and Anthropic Messages routing, live model discovery, separate API-key storage, and rolling 5-hour/weekly/monthly subscription usage in `/status`.
 - Per-session effective SDK configuration: `NessAgent.session()` now accepts main and reflection model overrides, `Session.config` / `Session.cost_tracker` expose the effective session view, and `Session.configure_models()` can rebind one live session without changing its siblings.
 - `NessAgent.configure_default_models()` for updating the model defaults inherited by sessions created in the future.
 

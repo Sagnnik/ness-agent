@@ -33,11 +33,13 @@ class OpenRouterAnthropicMessages(BaseChatModel):
     model_name: str = Field(alias="model")
     api_key: str
     base_url: str = "https://openrouter.ai/api/v1"
-    session_id: str
-    cache_ttl: str = "5m"
+    session_id: str = ""
+    cache_ttl: str | None = "5m"
     request_timeout: float = 120.0
     max_retries: int = 3
     reasoning: dict[str, Any] | None = None
+    include_openrouter_extensions: bool = True
+    billing_mode: str | None = None
     _tool_registry: Any = PrivateAttr(default=None)
     _tool_snapshot: list[dict[str, Any]] | None = PrivateAttr(default=None)
     _tool_additions: tuple[str, ...] = PrivateAttr(default=())
@@ -48,19 +50,33 @@ class OpenRouterAnthropicMessages(BaseChatModel):
 
     @property
     def _llm_type(self) -> str:
-        return "openrouter-anthropic-messages"
+        return (
+            "openrouter-anthropic-messages"
+            if self.include_openrouter_extensions
+            else "anthropic-messages-compatible"
+        )
 
     @property
     def _identifying_params(self) -> dict[str, Any]:
-        return {"model": self.model_name, "session_id": self.session_id}
+        return {
+            "model": self.model_name,
+            "session_id": self.session_id,
+            **({"billing_mode": self.billing_mode} if self.billing_mode else {}),
+        }
 
     def bind_tool_registry(self, registry: Any) -> BaseChatModel:
         # Return an immutable request binding. A live mutable registry makes
         # historical tool definitions change underneath cached parent calls.
         clone = self.model_copy()
         clone._tool_registry = registry
-        clone._tool_snapshot = clone._tools()
-        clone._tool_additions = tuple(sorted(registry.active_mcp_tools))
+        if self.include_openrouter_extensions:
+            clone._tool_snapshot = clone._tools()
+            clone._tool_additions = tuple(sorted(registry.active_mcp_tools))
+        else:
+            clone._tool_snapshot = [
+                clone._format_tool(tool) for tool in registry.active_tools
+            ]
+            clone._tool_additions = ()
         clone._tool_registry = None
         return clone
 
@@ -204,10 +220,15 @@ class OpenRouterAnthropicMessages(BaseChatModel):
             "model": self.model_name,
             "messages": converted,
             "max_tokens": int(kwargs.pop("max_tokens", 8192)),
-            "session_id": self.session_id,
-            "cache_control": {"type": "ephemeral", "ttl": self.cache_ttl},
             "stream": stream,
         }
+        if self.include_openrouter_extensions:
+            payload["session_id"] = self.session_id
+            if self.cache_ttl:
+                payload["cache_control"] = {
+                    "type": "ephemeral",
+                    "ttl": self.cache_ttl,
+                }
         if system:
             payload["system"] = system
         tools = self._tools(kwargs.pop("tools", None))
@@ -235,8 +256,7 @@ class OpenRouterAnthropicMessages(BaseChatModel):
             return exc.response.status_code == 429 or exc.response.status_code >= 500
         return False
 
-    @staticmethod
-    def _message_from_response(data: dict[str, Any]) -> AIMessage:
+    def _message_from_response(self, data: dict[str, Any]) -> AIMessage:
         text: list[str] = []
         reasoning: list[str] = []
         calls: list[dict[str, Any]] = []
@@ -262,6 +282,8 @@ class OpenRouterAnthropicMessages(BaseChatModel):
         output_tokens = int(usage.get("output_tokens") or 0)
         cache_read = int(usage.get("cache_read_input_tokens") or 0)
         response_metadata = {"model_name": data.get("model")}
+        if self.billing_mode:
+            response_metadata["billing_mode"] = self.billing_mode
         if usage.get("cost") is not None:
             response_metadata["cost"] = usage.get("cost")
         return AIMessage(

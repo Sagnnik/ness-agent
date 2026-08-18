@@ -25,7 +25,7 @@ ness
 `/init` creates project `.ness/` (dirs, permissions, hooks, mcp, default agent profiles, empty `NESS.md`) and ensures global config (`USER.md`, `instructions/`, `plans/<slug>/`).
 
 Or skip the env var and run `/login`. Choose Codex to sign in with ChatGPT
-using managed browser/device authentication, or OpenRouter for a masked API-key prompt. Device-code
+using managed browser/device authentication, or OpenRouter/OpenCode Go for a masked API-key prompt. Device-code
 login must first be enabled in ChatGPT **Settings > Security** by turning on
 **Device code authorization for Codex**; browser login does not require that setting.
 Selecting a connected provider makes it active and exposes only **Reconnect** and
@@ -251,7 +251,7 @@ Shift+Tab toggles plan/act mode without rebuilding the graph or invalidating the
 
 **Session**
 
-- `/status`: show provider authentication, account email/tier, every available usage-limit window (including weekly), reset times/credits, and the selected session's token/cache/cost stats. Subscription calls are labeled `subscription` rather than estimated as API spend.
+- `/status`: show provider authentication, account email/tier, every available usage-limit window (including OpenCode Go's rolling 5-hour, weekly, and monthly windows), reset times/credits, and the selected session's token/cache/cost stats. Subscription calls are labeled `subscription` rather than estimated as API spend.
 - `/threads`: open a scrollable saved-thread picker, ordered by recent updates and prefixed with local `YYYY-MM-DD HH:mm` timestamps. Threads with active turns show an animated working indicator; switching away does not interrupt them.
 - `/rename <name>`: set or update the current session's persistent display name (1–80 characters; requires thread autosave).
 - `/fork`: choose a human message, copy the conversation state before it into a child thread, and prefill that message for editing. Forking copies session memory/checkpoints but leaves current working-tree files unchanged.
