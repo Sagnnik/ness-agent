@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from ness_agent import (
     NessAgentOptions,
     PromptLayersConfig,
 )
+from ness_cli.provider.codex.auth import CodexAuth
+
+from codex_chat_model import CodexChatModel
 
 
 def auto_answer_question(questions: list[dict]) -> list[dict]:
@@ -47,14 +51,17 @@ async def run() -> int:
 
     thread_id = f"session-{uuid.uuid4().hex[:8]}"
     model_name = os.environ.get("NESS_MODEL")
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL") or "https://openrouter.ai/api/v1"
+    provider = os.environ.get("NESS_MODEL_PROVIDER")
     session_id = os.environ.get("NESS_SESSION_ID") or thread_id
-    provider = os.environ.get("NESS_MODEL_PROVIDER") or "deepinfra"
-    reasoning_effort = os.environ.get("NESS_MODEL_REASONING_EFFORT") or "high"
+    reasoning_effort = os.environ.get("NESS_MODEL_REASONING_EFFORT") or "xhigh"
 
-    if not api_key:
-        print("Ness SDK runner did not find an API key")
+    auth = CodexAuth()
+    credentials = auth.credentials()
+    if credentials is None:
+        print("Ness Codex runner did not find a usable auth.json")
+        return 1
+    if credentials.expires_at is not None and credentials.expires_at <= int(time.time()) + 60:
+        print("Ness Codex runner received an expired auth.json")
         return 1
 
     project_root = Path.cwd().resolve()
@@ -63,16 +70,12 @@ async def run() -> int:
     project_memory = ness_dir / "NESS.md"
     skills_dir = ness_dir / "skills"
 
-    model = ChatOpenRouter(
+
+    model = CodexChatModel(
         model=model_name,
-        api_key=api_key,
-        base_url=base_url,
-        session_id=session_id,
-        openrouter_provider={
-            "order": [provider, "baseten"],
-            "allow_fallbacks": True,
-        },
-        reasoning={"effort": reasoning_effort},
+        auth=auth,
+        reasoning_effort=reasoning_effort,
+        prompt_cache_key=str(uuid.uuid5(uuid.NAMESPACE_URL, f"ness-agent:{thread_id}")),
     )
 
     ness_options = NessAgentOptions(
@@ -104,7 +107,7 @@ async def run() -> int:
         thread_id=thread_id,
         mode="act",
         git_available=(project_root / ".git").exists(),
-        vision=False,
+        vision=True
     )
 
     result = await session.run(instructions, mode="act")

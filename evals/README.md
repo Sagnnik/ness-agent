@@ -1,6 +1,7 @@
 # Harbor evals
 
-The current adapter runs Ness through OpenRouter. It does not enable image input yet.
+The default adapter runs Ness through OpenRouter. The `evals/codex` adapter runs
+the same Ness SDK through the ChatGPT-authenticated Codex Responses transport.
 
 Install the eval dependencies:
 
@@ -33,6 +34,32 @@ PYTHONPATH=. uv run --group evals harbor run \
     -c evals/configs/tb-single-task.yaml \
     --env-file .env
 ```
+
+To run the Ness SDK through the ChatGPT-authenticated Codex model, use the
+separate Codex config. `CODEX_FORCE_AUTH_JSON=true` makes the adapter read
+`~/.codex/auth.json` on the host, upload it only for the agent phase, and remove
+the temporary copy when the trial ends:
+
+```bash
+CODEX_AUTH_JSON=true \
+PYTHONPATH=. uv run --group evals harbor run \
+    -c evals/configs/tb-single-task-codex.yaml \
+    --env-file .env
+```
+The auth file is not committed and must not be placed under `evals/jobs`.
+
+Codex subscription runs attach an API-equivalent cost estimate to each usage
+event. The standard short-context rates (USD per 1M tokens) are:
+
+| Model | Input | Cached input | Output | Cache write |
+| --- | ---: | ---: | ---: | ---: |
+| `gpt-5.6-sol` | $4.00 | $0.40 | $20.00 | $5.00 |
+| `gpt-5.6-terra` | $2.00 | $0.20 | $12.00 | $2.50 |
+| `gpt-5.6-luna` | $0.20 | $0.02 | $1.20 | $0.25 |
+
+These mirror the [OpenAI API pricing schedule](https://developers.openai.com/api/docs/pricing)
+for estimation only; they are not ChatGPT subscription charges. Prompts over
+272K input tokens use the long-context multipliers from that schedule.
 
 If you want to view the jobs info:
 ```bash
