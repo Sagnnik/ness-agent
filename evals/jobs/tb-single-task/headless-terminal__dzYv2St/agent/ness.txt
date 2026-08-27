@@ -1,0 +1,20 @@
+**Done.** Created `/app/headless_terminal.py` with `HeadlessTerminal(BaseTerminal)`.
+
+**What it does:**
+
+| Requirement | Implementation |
+|---|---|
+| Interactive bash shell | Spawns `/bin/bash -i` in a PTY via `ptyprocess.PtyProcess.spawn` |
+| Interactive programs | PTY provides a real TTY, so programs like `cat`, `top`, `sudo` work |
+| Modifier keys | `\x03` (Ctrl+C), `\x1a` (Ctrl+Z), etc. are sent as raw bytes — tested |
+| Sources startup files | `bash -i` sources `~/.bashrc`, `~/.bash_profile`, etc. automatically |
+| `send_keystrokes(keystrokes, wait_sec)` | Writes keystrokes to the PTY, then sleeps `wait_sec` seconds |
+
+**Extra (beyond the interface):**
+- `read_output()` → drains all buffered PTY output (non-blocking, using `select` + `os.read`)
+- `close()` → sends Ctrl+C then force-terminates
+- Context manager support (`with HeadlessTerminal() as t:`)
+
+**Dependency installed:** `pexpect` (which pulled in `ptyprocess` v0.7.0).
+
+**Verified:** import, echo commands, Ctrl+C interrupt, interactive programs (cat), piping, shell interactivity flag, context manager — all passing.

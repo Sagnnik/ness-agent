@@ -1,0 +1,16 @@
+Implementation complete. Here's a summary:
+
+**`/app/headless_terminal.py`** — `HeadlessTerminal(BaseTerminal)`
+
+- **`send_keystrokes(keystrokes, wait_sec=0.0)`** — writes UTF-8 encoded keystrokes to the pseudo-terminal master fd. If `wait_sec > 0`, drains available output for that duration before returning. Supports any control characters (`\x03` for Ctrl-C, `\n` for Enter, etc.).
+
+- **`read_output(timeout=0.5)`** — reads available terminal output within the timeout window and returns it as a decoded string.
+
+- **`close()`** — sends `SIGHUP`, waits for the child process, and closes the fd.
+
+- Context manager support (`__enter__` / `__exit__`) and destructor cleanup.
+
+Under the hood:
+- Uses `pty.fork()` so the child runs `/bin/bash -i` with its controlling terminal connected to a pseudo-terminal. This makes bash source startup files (`~/.bashrc`, `~/.profile`, etc.).
+- Sets `TERM=xterm-256color` and configures window size (80×24) via `TIOCSWINSZ` so interactive programs (python, vim, etc.) behave correctly.
+- `_drain()` uses `select.select()` with a deadline to read available data without blocking indefinitely.
