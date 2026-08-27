@@ -37,6 +37,31 @@ CODEX_API_PRICING: dict[str, dict[str, float]] = {
 }
 
 
+# The Codex CLI model catalog reports this as the active context window for
+# the GPT-5.6 Codex models. Keep this metadata in the eval bundle because the
+# Harbor sandbox installs the Ness package separately from these uploaded
+# adapter files.
+CODEX_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-5.6-sol": 272_000,
+    "gpt-5.6-terra": 272_000,
+    "gpt-5.6-luna": 272_000,
+}
+
+
+def context_window_for_model(model: str | None) -> int | None:
+    if not model:
+        return None
+    normalized = model.strip().lower()
+    if normalized == "gpt-5.6":
+        normalized = "gpt-5.6-sol"
+    if normalized in CODEX_CONTEXT_WINDOWS:
+        return CODEX_CONTEXT_WINDOWS[normalized]
+    for model_id, window in CODEX_CONTEXT_WINDOWS.items():
+        if normalized.startswith(model_id + "-"):
+            return window
+    return None
+
+
 def _pricing_for_model(model: str) -> dict[str, float] | None:
     normalized = model.strip().lower()
     if normalized == "gpt-5.6":

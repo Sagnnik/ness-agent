@@ -17,7 +17,7 @@ from ness_agent import (
 )
 from ness_cli.provider.codex.auth import CodexAuth
 
-from codex_chat_model import CodexChatModel
+from codex_chat_model import CodexChatModel, context_window_for_model
 
 
 def auto_answer_question(questions: list[dict]) -> list[dict]:
@@ -79,8 +79,10 @@ async def run() -> int:
     )
 
     ness_options = NessAgentOptions(
+        context_window=context_window_for_model(model_name),
         yolo_mode=True,
         enable_approval=False,
+        recursion_limit=10000,
         auto_save_threads=True,
         session_end_reflection=False,
         project_root=project_root,

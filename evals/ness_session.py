@@ -78,6 +78,7 @@ async def run() -> int:
     ness_options = NessAgentOptions(
         yolo_mode=True,
         enable_approval=False,
+        recursion_limit=10000,
         auto_save_threads=True,
         session_end_reflection=False,
         project_root=project_root,
