@@ -18,6 +18,7 @@ from ness_agent.graph.helpers import (
     _with_working_state_tail,
     _semantic_conversation,
     _active_turn_split,
+    _split_active_turn_safely,
     _incremental_input_tokens,
     _is_internal_message,
     _needs_approval,
@@ -29,6 +30,9 @@ from ness_agent.graph.helpers import (
 )
 from ness_agent.compaction import _invoke_summary
 from ness_agent.context.budget import (
+    COMPACTION_ACTIVE_TURN_MAX_TOKENS,
+    COMPACTION_ACTIVE_TURN_MIN_TOKENS,
+    COMPACTION_ACTIVE_TURN_RATIO,
     CompactionStatus,
     calculate_context_pressure,
     pressure_note,
@@ -125,21 +129,29 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             deferred_mcp=tools_reg.deferred_mcp_summary(),
         ))
 
-    def _summary_instruction(base: str, active_count: int) -> str:
+    def _summary_instruction(base: str, retained_count: int) -> str:
         if "{messages}" in base:
             raise ValueError(
                 "compaction instructions no longer accept {messages}; remove the transcript placeholder"
             )
-        # summarizer should see the active turn but not summarize it
-        # since it will be added verbatim in the raw messges again after compaction
+        retained_rule = (
+            f"The final {retained_count} transcript message(s) form a recent suffix that will "
+            "be retained verbatim; do not repeat them in the summary. "
+            if retained_count
+            else "No transcript suffix will be retained verbatim. "
+        )
         return (
             base.strip()
             + "\n\nHARNESS COMPACTION RULES\n"
             + "The conversation above is already the transcript; do not ask for it again. "
             + "Do not call tools. Output only the continuation summary. "
             + "Ignore every <system-reminder> and <plan-mode> block as historical semantic content. "
-            + f"The final {active_count} message(s) form the active turn and will be retained verbatim; "
-            + "do not repeat them in the summary."
+            + retained_rule
+            + "If the cut is inside the current user turn, preserve the original request, "
+            + "constraints and acceptance criteria, completed work, current operation, files modified, "
+            + "commands and process or job IDs, verified results with exit status, partial or unverified "
+            + "observations, errors and rejected approaches, and the next concrete step. Never turn a "
+            + "partial success-looking line into a verified successful command."
         )
 
     def _resolve_instruction(source) -> str:
@@ -194,11 +206,47 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         if not forced and not pressure.should_compact:
             return updates
         
-        # split the conversation into completed and active turns
+        # Split completed history from the current continuation
         completed, active = _active_turn_split(conversation)
-        # remove overlay messages
         completed_semantic = _semantic_conversation(completed) 
-        active_semantic = _semantic_conversation(active)
+        active_semantic = _semantic_conversation(active) # removed overlay messages
+        usable_context = max(1, pressure.context_limit - options.compaction_buffer_tokens)
+        active_turn_budget = min(
+            usable_context,
+            max(
+                COMPACTION_ACTIVE_TURN_MIN_TOKENS,
+                min(
+                    COMPACTION_ACTIVE_TURN_MAX_TOKENS,
+                    int(usable_context * COMPACTION_ACTIVE_TURN_RATIO),
+                ),
+            ),
+        )
+        active_old_msgs: list[BaseMessage] = []
+        retained_semantic = active_semantic
+        if (
+            active_semantic
+            and resolve_token_count(active_semantic, known_input_tokens=None)
+            > active_turn_budget
+        ):
+            active_old_msgs, retained_semantic = _split_active_turn_safely(
+                active_semantic,
+                keep_recent_tokens=active_turn_budget,
+            )
+        summarize_semantic = [*completed_semantic, *active_old_msgs]
+
+        retained_transcript_count = 0
+        if retained_semantic:
+            first_retained = retained_semantic[0]
+            retained_index = next(
+                (
+                    index
+                    for index, message in enumerate(conversation)
+                    if message is first_retained
+                ),
+                len(conversation),
+            )
+            retained_transcript_count = len(conversation) - retained_index
+
         # get the current turn (for failure retry suppression)
         active_turn_id = str(getattr(active_semantic[0], "id", "") or "") if active_semantic else ""
 
@@ -212,15 +260,9 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             status["skip_reason"] = "retry_suppressed"
             return updates
         
-        # nothing in the history to summarize - one active turn only
-        if not completed_semantic:
+        if not summarize_semantic:
             status["skip_reason"] = "no_completed_history"
             status["forced"] = forced
-            if pressure.safety_threshold_reached:
-                # if one active turn is too large - hard fail or skip for 80% pressure
-                raise RuntimeError(
-                    "The active turn is too large to fit safely and there is no completed history to summarize."
-                )
             return updates
 
         # same system message and model for prefix caching
@@ -248,7 +290,8 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                     [fork_system] + conversation,
                     parent_model,
                     instruction=_summary_instruction(
-                        _resolve_instruction(instruction_source), len(active)
+                        _resolve_instruction(instruction_source),
+                        retained_transcript_count,
                     ),
                     max_output_tokens=options.compaction_summary_max_tokens,
                 )
@@ -282,8 +325,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             additional_kwargs={"ness_internal": "compacted_history"},
         )
         # combine the summarized history and the active turn
-        compacted = [compacted_history, *active_semantic]
-        # even after compaction, is context or active turn still too big? - hard fail
+        compacted = [compacted_history, *retained_semantic]
         after_tokens = resolve_token_count([current_system] + compacted, known_input_tokens=None)
         if after_tokens >= pressure.context_limit - options.compaction_buffer_tokens:
             raise RuntimeError(
@@ -317,20 +359,16 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             "trigger": "manual" if forced else ("safety" if pressure.safety_threshold_reached else "automatic"),
             "before_tokens": pressure.token_count,
             "after_tokens": after_tokens,
-            "active_suffix_messages": len(active_semantic),
-            # The summary and unsummarized suffix form one durable checkpoint.
-            # This is required for SDK callers, which do not separately append
-            # user events before entering the graph.  ``default=str`` keeps
-            # provider-specific metadata from making the event non-JSON-safe.
+            "active_suffix_messages": len(retained_semantic),
             "active_suffix": json.loads(json.dumps(
-                [message_to_dict(message) for message in active_semantic],
+                [message_to_dict(message) for message in retained_semantic],
                 ensure_ascii=False,
                 default=str,
             )),
             "model": model_name,
         }
         persist.append_compaction_checkpoint(
-            thread_id, event, active_turn=bool(active_semantic)
+            thread_id, event, active_turn=bool(retained_semantic)
         )
 
         status.update({
@@ -338,7 +376,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             "trigger": event["trigger"],
             "forced": forced,
             "after_tokens": after_tokens,
-            "active_suffix_messages": len(active_semantic),
+            "active_suffix_messages": len(retained_semantic),
             "overlay_note": pressure_note(pressure, compacted=True),
         })
         updates.update({
@@ -356,8 +394,8 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                 "status": "success",
                 "before_tokens": pressure.token_count,
                 "after_tokens": after_tokens,
-                "active_suffix_messages": len(active_semantic),
-                "info": "Conversation summarized; active turn retained verbatim.",
+                "active_suffix_messages": len(retained_semantic),
+                "info": "Conversation summarized; recent continuation retained verbatim.",
             })
         return updates
 

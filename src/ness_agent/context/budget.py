@@ -52,6 +52,9 @@ class CompactionBridgeEvent(TypedDict, total=False):
 COMPACTION_WARN_RATIO = 0.70
 COMPACTION_SUMMARY_RATIO = 0.80
 COMPACTION_HARD_RATIO = 0.92
+COMPACTION_ACTIVE_TURN_RATIO = 0.40
+COMPACTION_ACTIVE_TURN_MIN_TOKENS = 8_000
+COMPACTION_ACTIVE_TURN_MAX_TOKENS = 65_000
 
 
 def content_text(content) -> str:
@@ -139,7 +142,7 @@ def pressure_note(
     if compacted:
         return (
             "Conversation was summarized at this model boundary. "
-            "The active task was retained verbatim; re-read files if needed."
+            "A coherent recent continuation was retained verbatim; re-read files if needed."
         )
     parts: list[str] = []
     if had_stored_compaction:

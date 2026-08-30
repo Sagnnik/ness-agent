@@ -79,13 +79,97 @@ def _incremental_input_tokens(
 
 
 def _active_turn_split(messages) -> tuple[list[BaseMessage], list[BaseMessage]]:
-    """Split completed history from the latest real user turn."""
+    """Split completed history from the current continuation.
+
+    A mid-turn compaction may summarize the user message that started the
+    turn.  On later tool loops, the latest compacted-history message becomes
+    the only durable boundary before the retained active suffix.
+    """
     items = list(messages)
     for index in range(len(items) - 1, -1, -1):
         message = items[index]
         if message.type == "human" and not _is_internal_message(message):
             return items[:index], items[index:]
+    for index in range(len(items) - 1, -1, -1):
+        if _is_internal_message(items[index], "compacted_history"):
+            return items[: index + 1], items[index + 1 :]
     return items, []
+
+
+def _split_active_turn_safely(
+    messages: list[BaseMessage],
+    *,
+    keep_recent_tokens: int,
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    """Split an active turn without separating tool calls from results.
+
+    The token budget is a target.  The retained suffix may exceed it when the
+    newest tool-call batch is larger than the target.
+    """
+    items = list(messages)
+    if not items:
+        return [], []
+    if keep_recent_tokens <= 0:
+        raise ValueError("keep_recent_tokens must be positive")
+
+    units: list[list[BaseMessage]] = []
+    valid_units: list[bool] = []
+    index = 0
+    while index < len(items):
+        message = items[index]
+        if isinstance(message, ToolMessage):
+            if units:
+                units[-1].append(message)
+                valid_units[-1] = False
+            else:
+                units.append([message])
+                valid_units.append(False)
+            index += 1
+            continue
+
+        unit = [message]
+        valid = True
+        index += 1
+        if isinstance(message, AIMessage) and message.tool_calls:
+            expected_call_ids = {
+                str(call.get("id") or f"native-{call_index}")
+                for call_index, call in enumerate(message.tool_calls)
+            }
+            result_call_ids: list[str] = []
+            while index < len(items) and isinstance(items[index], ToolMessage):
+                unit.append(items[index])
+                result_call_ids.append(str(items[index].tool_call_id or ""))
+                index += 1
+            valid = (
+                bool(expected_call_ids)
+                and len(result_call_ids) == len(expected_call_ids)
+                and len(set(result_call_ids)) == len(result_call_ids)
+                and set(result_call_ids) == expected_call_ids
+            )
+        units.append(unit)
+        valid_units.append(valid)
+
+    retained_start = len(units)
+    retained_tokens = 0
+    for unit_index in range(len(units) - 1, -1, -1):
+        if not valid_units[unit_index]:
+            if retained_start == len(units):
+                return items, []
+            break
+        retained_start = unit_index
+        retained_tokens += resolve_token_count(
+            units[unit_index], known_input_tokens=None
+        )
+        if retained_tokens >= keep_recent_tokens:
+            break
+
+    old_active_msgs = [message for unit in units[:retained_start] for message in unit]
+    new_active_msgs = [message for unit in units[retained_start:] for message in unit]
+
+    if new_active_msgs and isinstance(new_active_msgs[0], ToolMessage):
+        return items, []
+    return old_active_msgs, new_active_msgs
+
 
 def _needs_approval(name, args, options, permission_store, tools_reg: ToolRegistry) -> bool:
     """Decide whether to ask the user for approval before running a tool."""
