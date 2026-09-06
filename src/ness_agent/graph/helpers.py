@@ -156,10 +156,16 @@ def _split_active_turn_safely(
             if retained_start == len(units):
                 return items, []
             break
-        retained_start = unit_index
-        retained_tokens += resolve_token_count(
+        unit_tokens = resolve_token_count(
             units[unit_index], known_input_tokens=None
         )
+        if (
+            retained_start < len(units)
+            and retained_tokens + unit_tokens > keep_recent_tokens
+        ):
+            break
+        retained_start = unit_index
+        retained_tokens += unit_tokens
         if retained_tokens >= keep_recent_tokens:
             break
 

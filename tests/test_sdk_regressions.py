@@ -633,7 +633,7 @@ def test_compaction_retains_multi_step_active_tool_trajectory(tmp_path: Path):
     checkpoint = agent.config.thread_store.load_thread_events(
         "session-tool-trajectory"
     )[-1]
-    durable = messages_from_dict(checkpoint["active_new_msgs"])
+    durable = messages_from_dict(checkpoint["active_suffix"])
     assert [message.type for message in durable] == ["human", "ai", "tool"]
     assert durable[-1].tool_call_id == "call-1"
 
@@ -676,6 +676,70 @@ def test_active_turn_split_keeps_parallel_tool_batch_atomic():
         "recent-1",
         "recent-2",
     }
+
+
+@pytest.mark.parametrize("remaining_tokens", [0, 1, 100])
+def test_active_turn_split_excludes_older_batch_over_budget(remaining_tokens):
+    user = HumanMessage(content="long task")
+    batches = [
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ping", "args": {}, "id": call_id}],
+            ),
+            ToolMessage(content="x" * size, tool_call_id=call_id),
+        ]
+        for call_id, size in [("old", 270_000), ("recent", 60_000)]
+    ]
+    budget = resolve_token_count(batches[-1]) + remaining_tokens
+
+    prefix, suffix = _split_active_turn_safely(
+        [user, *batches[0], *batches[1]], keep_recent_tokens=budget
+    )
+
+    assert prefix == [user, *batches[0]]
+    assert suffix == batches[1]
+    assert resolve_token_count(suffix) <= budget
+
+
+@pytest.mark.parametrize("image_results", [False, True], ids=["text", "images"])
+def test_compaction_drops_large_older_batch_within_active_turn(tmp_path, image_results):
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-large-older-batch",
+        mode="act",
+        git_available=False,
+    )
+    binding = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="summary")))
+    rt.last_bound_model = binding
+    batches = []
+    for call_id, text_size, image_count in [("old", 270_000, 25), ("recent", 60_000, 5)]:
+        content = (
+            [{"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}]
+            * image_count
+            if image_results else "x" * text_size
+        )
+        batches.append([
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ping", "args": {}, "id": call_id}],
+            ),
+            ToolMessage(content=content, tool_call_id=call_id),
+        ])
+    messages = [HumanMessage(content="inspect all results"), *batches[0], *batches[1]]
+
+    # Provider usage triggers compaction even if the local estimate is too low.
+    with patch("ness_agent.graph.nodes._incremental_input_tokens", return_value=110_000):
+        updates = asyncio.run(rt.context_gate({"messages": messages, "mode": "act"}))
+
+    assert updates["compaction_status"]["compacted"] is True
+    assert updates["model_context_messages"][1:] == batches[1]
+    assert updates["compaction_status"]["after_tokens"] < (
+        updates["compaction_status"]["context_limit"]
+        - agent.config.options.compaction_buffer_tokens
+    )
+    binding.ainvoke.assert_awaited_once()
 
 
 def test_active_turn_split_does_not_retain_mismatched_tool_result():

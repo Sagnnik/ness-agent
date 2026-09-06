@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from PIL import Image
 
 from ness_agent import NessAgent, PromptLayers, PromptLayersConfig
-from ness_agent.context.budget import content_text
+from ness_agent.context.budget import IMAGE_TOKEN_ALLOWANCE, content_text, resolve_token_count
 from ness_agent.graph.nodes import _normalize_tool_result
 from ness_agent.hooks import Hook
 from ness_agent.options import NessAgentOptions
@@ -71,6 +72,32 @@ def test_normalize_tool_result_preserves_strings_and_media() -> None:
     assert display_text == "Read image: test.png, 2x1\n[image]"
     assert "cG5n" not in display_text
     assert content_text(content) == "Read image: test.png, 2x1 [image]"
+
+
+@pytest.mark.parametrize("block_type", ["image_url", "image", "input_image"])
+def test_image_token_estimate_counts_images_without_counting_payload(block_type) -> None:
+    def message(payload, count):
+        if block_type == "image_url":
+            block = {"type": block_type, "image_url": {"url": payload}}
+        elif block_type == "input_image":
+            block = {"type": block_type, "image_url": payload}
+        else:
+            block = {
+                "type": block_type,
+                "source": {"type": "base64", "media_type": "image/png", "data": payload},
+            }
+        return ToolMessage(content=[block] * count, tool_call_id="image-call")
+
+    small = message("data:image/png;base64,cG5n", 1)
+    large = message("data:image/png;base64," + "A" * 300_000, 1)
+    multiple = message("data:image/png;base64,cG5n", 3)
+    placeholder = ToolMessage(content="[image]", tool_call_id="image-call")
+
+    assert content_text(large.content) == "[image]"
+    assert resolve_token_count([small]) == resolve_token_count([large])
+    assert resolve_token_count([small]) == resolve_token_count([placeholder]) + IMAGE_TOKEN_ALLOWANCE
+    assert resolve_token_count([multiple]) >= resolve_token_count([small]) + 2 * IMAGE_TOKEN_ALLOWANCE
+    assert resolve_token_count([multiple], known_input_tokens=123) == 123
 
 
 def test_tool_end_prefers_safe_display_text() -> None:
