@@ -52,12 +52,12 @@ PLAN_COMPACTION_CHECKPOINT_RATIO = 0.75
 
 def _tool_end_data(msg: Any) -> dict[str, Any]:
     """Build ``tool_end`` SessionEvent data, including tool duration when present."""
+    kwargs = getattr(msg, "additional_kwargs", None) or {}
     data: dict[str, Any] = {
         "name": getattr(msg, "name", "tool"),
-        "content": str(getattr(msg, "content", "")),
+        "content": str(kwargs.get("display_text", getattr(msg, "content", ""))),
         "id": getattr(msg, "tool_call_id", None),
     }
-    kwargs = getattr(msg, "additional_kwargs", None) or {}
     if "duration_ms" in kwargs and kwargs["duration_ms"] is not None:
         data["duration_ms"] = int(kwargs["duration_ms"])
     return data
@@ -272,6 +272,7 @@ class Session:
                 project_root=project_root,
                 agent_config=cfg,
                 all_skills=self._skill_loader.load(),
+                vision=self._vision,
             )
         )
 

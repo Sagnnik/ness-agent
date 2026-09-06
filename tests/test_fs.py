@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest import mock
 
 from pydantic import BaseModel
+from PIL import Image
 
 os.environ.setdefault("OPENAI_API_KEY", "test")
 
@@ -110,12 +111,82 @@ class ReadFileTests(SessionContextTestMixin, unittest.TestCase):
         self.assertNotIn(" 401| line 401", result)
         self.assertIn("truncated", result)
 
-    def test_reads_file_outside_project(self) -> None:
+    def test_rejects_file_outside_project(self) -> None:
         with tempfile.TemporaryDirectory() as outside_dir:
             target = Path(outside_dir) / "outside.txt"
             target.write_text("outside project\n", encoding="utf-8")
             result = read.invoke({"path": str(target)})
-        self.assertIn("outside project", result)
+        self.assertTrue(result.startswith("Error:"))
+        self.assertIn("is outside", result)
+
+    def test_existing_text_output_is_unchanged(self) -> None:
+        (self.root / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+
+        result = read.invoke({"path": "hello.txt"})
+
+        self.assertEqual(result, "   1| alpha\n   2| beta")
+
+    def test_reads_relative_image_as_ordered_content_blocks(self) -> None:
+        target = self.root / "code.ppm"
+        Image.new("RGB", (7, 5), "green").save(target, format="PPM")
+
+        result = read.invoke({"path": "code.ppm"})
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(result[0], {"type": "text", "text": "Read image: code.ppm, 7x5"})
+        self.assertEqual(result[1]["type"], "image_url")
+        self.assertEqual(result[1]["image_url"]["detail"], "high")
+        self.assertTrue(result[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_reads_absolute_image_within_project(self) -> None:
+        target = self.root / "absolute.png"
+        Image.new("RGB", (4, 3), "purple").save(target)
+
+        result = read.invoke({"path": str(target)})
+
+        self.assertEqual(result[0]["text"], "Read image: absolute.png, 4x3")
+
+    def test_text_only_session_omits_image_data(self) -> None:
+        target = self.root / "code.png"
+        Image.new("RGB", (6, 4), "white").save(target)
+        self.ctx.vision = False
+
+        result = read.invoke({"path": "code.png"})
+
+        self.assertEqual(
+            result,
+            "Read image: code.png, 6x4\n[image omitted: model is text-only]",
+        )
+        self.assertNotIn("base64", result)
+
+    def test_unknown_binary_file_has_actionable_error(self) -> None:
+        (self.root / "data.bin").write_bytes(b"\x00\x01binary")
+
+        result = read.invoke({"path": "data.bin"})
+
+        self.assertIn("Unsupported binary file", result)
+        self.assertIn("UTF-8 text or a raster image", result)
+
+    def test_pdf_and_video_errors_suggest_conversion_tools(self) -> None:
+        (self.root / "report.pdf").write_bytes(b"%PDF-1.7\n\xff")
+        (self.root / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42\xff")
+
+        pdf_result = read.invoke({"path": "report.pdf"})
+        video_result = read.invoke({"path": "clip.mp4"})
+
+        self.assertIn("PyMuPDF", pdf_result)
+        self.assertIn("ffmpeg or OpenCV", video_result)
+
+    def test_rejects_large_file_before_reading_it(self) -> None:
+        target = self.root / "huge.bin"
+        with target.open("wb") as handle:
+            handle.truncate(50 * 1024 * 1024 + 1)
+
+        with mock.patch.object(Path, "read_bytes") as read_bytes:
+            result = read.invoke({"path": "huge.bin"})
+
+        self.assertIn("supports files up to", result)
+        read_bytes.assert_not_called()
 
     def test_requested_limit_is_capped(self) -> None:
         target = self.root / "huge.txt"

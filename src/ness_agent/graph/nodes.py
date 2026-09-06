@@ -95,6 +95,32 @@ class NodesRuntime:
         self.metadata: Mapping[str, Any] = metadata if metadata is not None else {}
         self.last_bound_model = None
 
+
+def _normalize_tool_result(result: Any) -> tuple[str | list[dict[str, Any]], str]:
+    """Keep model-facing content blocks while producing a safe text representation."""
+    if not isinstance(result, list):
+        text = str(result)
+        return text, text
+
+    content: list[dict[str, Any]] = []
+    display_parts: list[str] = []
+    for item in result:
+        if not isinstance(item, dict):
+            text = str(result)
+            return text, text
+        block = dict(item)
+        block_type = block.get("type")
+        if block_type in {"image_url", "image", "input_image"}:
+            content.append(block)
+            display_parts.append("[image]")
+        elif block_type in {"text", "input_text", "output_text"} and "text" in block:
+            content.append(block)
+            display_parts.append(str(block["text"]))
+        else:
+            text = str(result)
+            return text, text
+    return content, "\n".join(display_parts)
+
 def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadata = None) -> NodesRuntime:
     rt = NodesRuntime(config, thread_id=thread_id, mode=mode, git_available=git_available, metadata=metadata)
     # objects of the backends created in the NessAgentConfig
@@ -753,32 +779,49 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                     tool_span.set_attribute(TOOL_ERROR, True)
                     tool_span.set_attribute(TOOL_EXIT_STATUS, "exception")
                     result = f"Error: {exc}"
+                content, display_text = _normalize_tool_result(result)
                 tool_span.set_attribute(TOOL_DURATION_MS, int((time.monotonic() - t0) * 1000))
                 if capture_msgs:
                     # Tool results can be MBs — truncate
                     # to keep OTLP batches under the SDK's ~5MB limit
                     tool_span.set_attribute(
                         GEN_AI_TOOL_CALL_RESULT,
-                        truncate_for_span(str(result), config.tracing.max_message_length),
+                        truncate_for_span(display_text, config.tracing.max_message_length),
                     )
             dur = int((time.monotonic() - t0) * 1000)
-            content = str(result)
 
             # run the postToolUse hook
-            _ok, hook_msg = hooks.run("postToolUse", {"tool": name, "args": args, "result": content, "thread_id": thread_id})
+            _ok, hook_msg = hooks.run(
+                "postToolUse",
+                {
+                    "tool": name,
+                    "args": args,
+                    "result": display_text,
+                    "thread_id": thread_id,
+                },
+            )
             if hook_msg:
-                content = hook_msg + "\n\n" + content if content.strip() else hook_msg
+                if isinstance(content, list):
+                    content = [{"type": "text", "text": hook_msg}, *content]
+                else:
+                    content = hook_msg + "\n\n" + content if content.strip() else hook_msg
+                display_text = (
+                    hook_msg + "\n\n" + display_text if display_text.strip() else hook_msg
+                )
             results.append(ToolMessage(
                 tool_call_id=call_id,
                 name=name,
                 content=content,
-                additional_kwargs={"duration_ms": dur},
+                additional_kwargs={"duration_ms": dur, "display_text": display_text},
             ))
             # append the ToolMessage to the results list and append the event to the event log
-            persist.append_event(thread_id, _tool_event(name, args, content, dur, call_id=call_id))
+            persist.append_event(
+                thread_id,
+                _tool_event(name, args, display_text, dur, call_id=call_id),
+            )
 
             # Track skills loaded via skill_view for the L3 overlay
-            if name == "skill_view" and not str(content).startswith("Error:"):
+            if name == "skill_view" and not display_text.startswith("Error:"):
                 sk_name = str(args.get("name", ""))
                 if sk_name and sk_name in all_skills:
                     newly_loaded_names.add(sk_name)

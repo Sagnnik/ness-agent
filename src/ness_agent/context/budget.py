@@ -62,7 +62,10 @@ def content_text(content) -> str:
         parts: list[str] = []
         for item in content:
             if isinstance(item, dict):
-                parts.append(str(item.get("text", item)))
+                if item.get("type") in {"image_url", "image", "input_image"}:
+                    parts.append("[image]")
+                elif "text" in item:
+                    parts.append(str(item["text"]))
             else:
                 parts.append(str(item))
         return " ".join(parts)

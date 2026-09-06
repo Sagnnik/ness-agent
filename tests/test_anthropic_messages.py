@@ -100,6 +100,75 @@ def test_tool_only_assistant_has_no_empty_text_block() -> None:
     ]
 
 
+def test_tool_result_string_stays_a_string() -> None:
+    model = OpenRouterAnthropicMessages(model="test", api_key="test")
+
+    payload = model._payload([ToolMessage("contents", tool_call_id="t1")])
+
+    assert payload["messages"][0]["content"][0]["content"] == "contents"
+
+
+def test_image_tool_result_uses_anthropic_base64_source() -> None:
+    model = OpenRouterAnthropicMessages(model="test", api_key="test")
+    message = ToolMessage(
+        content=[
+            {"type": "text", "text": "Read image: code.png, 2x1"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64,cG5n",
+                    "detail": "high",
+                },
+            },
+        ],
+        tool_call_id="t1",
+    )
+
+    payload = model._payload([message])
+
+    assert payload["messages"][0]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": [
+                {"type": "text", "text": "Read image: code.png, 2x1"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "cG5n",
+                    },
+                },
+            ],
+        }
+    ]
+
+
+def test_direct_data_url_image_uses_anthropic_base64_source() -> None:
+    model = OpenRouterAnthropicMessages(model="test", api_key="test")
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": "inspect"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/webp;base64,d2VicA=="},
+            },
+        ]
+    )
+
+    payload = model._payload([message])
+
+    assert payload["messages"][0]["content"][1] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/webp",
+            "data": "d2VicA==",
+        },
+    }
+
+
 def test_thinking_signature_round_trips_and_effort_uses_output_config() -> None:
     model = OpenRouterAnthropicMessages(
         model="anthropic/claude-sonnet-5",

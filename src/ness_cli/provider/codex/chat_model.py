@@ -94,7 +94,10 @@ class CodexSubscriptionChatModel(BaseChatModel):
             elif item.get("type") == "image_url":
                 value = item.get("image_url")
                 url = value.get("url") if isinstance(value, dict) else value
-                blocks.append({"type": "input_image", "image_url": str(url)})
+                block = {"type": "input_image", "image_url": str(url)}
+                if isinstance(value, dict) and value.get("detail"):
+                    block["detail"] = str(value["detail"])
+                blocks.append(block)
             elif item.get("type") in {"text", "input_text", "output_text"}:
                 blocks.append({"type": text_type, "text": str(item.get("text") or "")})
         return blocks
@@ -109,11 +112,16 @@ class CodexSubscriptionChatModel(BaseChatModel):
             elif isinstance(message, HumanMessage):
                 items.append({"role": "user", "content": self._content(message.content)})
             elif isinstance(message, ToolMessage):
+                output = (
+                    message.content
+                    if isinstance(message.content, str)
+                    else self._content(message.content)
+                )
                 items.append(
                     {
                         "type": "function_call_output",
                         "call_id": message.tool_call_id,
-                        "output": str(message.content),
+                        "output": output,
                     }
                 )
             elif isinstance(message, AIMessage):

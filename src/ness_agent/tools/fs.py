@@ -7,13 +7,21 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from langchain_core.tools import tool
 
+from ness_agent.media import (
+    ImageNormalizationError,
+    ImageNotRecognized,
+    normalize_image,
+    png_data_url,
+)
 from ness_agent.session_context import get_session_context
 
 READ_FILE_DEFAULT_LIMIT = 400
 READ_FILE_MAX_LIMIT = 2000
+READ_FILE_MAX_BYTES = 50 * 1024 * 1024
 PROTECTED_WRITE_DIRS = frozenset({".git", ".ness"})
 
 
@@ -28,24 +36,75 @@ def _relative_to_root(path: str) -> str:
 def _project_root() -> Path:
     return get_session_context().project_root
 
-
-def _resolve_read_path(path: str) -> str:
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = _project_root() / candidate
-    return str(candidate.resolve())
+def _unsupported_binary_message(path: Path, raw: bytes) -> str:
+    suffix = path.suffix.lower()
+    
+    if suffix == ".pdf" or raw.startswith(b"%PDF-"):
+        return (
+            "Unsupported PDF file. Render selected pages to PNG/JPEG with PyMuPDF, "
+            "then pass them as base64 images in the image_url content block."
+        )
+    
+    if suffix in {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".flv", ".ts", ".3gp", ".ogv"}:
+        return (
+            "Unsupported video file. Extract keyframes with ffmpeg or OpenCV, "
+            "then pass them as base64 images in the image_url content block."
+        )
+    
+    return (
+        f"Unsupported binary file: {path.name}. Convert it to UTF-8 text or a raster "
+        "image (PNG/JPEG) for submission."
+    )
 
 
 @tool
-def read(path: str, offset: int = 1, limit: int | None = None) -> str:
-    """Read a file from the local filesystem.
+def read(path: str, offset: int = 1, limit: int | None = None) -> str | list[dict[str, Any]]:
+    """Read a UTF-8 text file or raster image from the local filesystem.
 
     Defaults to 400 lines from ``offset`` (1-based); cap is 2000 lines per call.
-    Pass ``limit`` to request fewer or more lines (still capped at 2000).
+    For PDFs or videos, use shell tools to render pages or extract frames first.
     """
     try:
-        abs_path = _resolve_read_path(path)
-        lines = Path(abs_path).read_text(encoding="utf-8").splitlines()
+        abs_path = _validate_path(path)
+        target = Path(abs_path)
+        if not target.is_file():
+            return f"Error: {path} is not a regular file"
+        size = target.stat().st_size
+        if size > READ_FILE_MAX_BYTES:
+            return (
+                f"Error: {target.name} is {size} bytes; read() supports files up to "
+                f"{READ_FILE_MAX_BYTES} bytes"
+            )
+
+        raw = target.read_bytes()
+        try:
+            normalized, width, height = normalize_image(raw)
+        except ImageNotRecognized:
+            pass
+        except ImageNormalizationError as exc:
+            return f"Error: cannot read image {target.name}: {exc}"
+        else:
+            description = f"Read image: {target.name}, {width}x{height}"
+            if get_session_context().vision is False:
+                return f"{description}\n[image omitted: model is text-only]"
+            return [
+                {"type": "text", "text": description},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": png_data_url(normalized),
+                        "detail": "high",
+                    },
+                },
+            ]
+
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"Error: {_unsupported_binary_message(target, raw)}"
+        if "\x00" in decoded:
+            return f"Error: {_unsupported_binary_message(target, raw)}"
+        lines = decoded.splitlines()
         start = max(0, int(offset) - 1)
         requested_limit = READ_FILE_DEFAULT_LIMIT if limit is None else max(0, int(limit))
         effective_limit = min(requested_limit, READ_FILE_MAX_LIMIT)
