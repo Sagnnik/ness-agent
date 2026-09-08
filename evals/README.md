@@ -26,7 +26,7 @@ PYTHONPATH=. uv run --group evals harbor run \
 
 Use another `--include-task-name` value to select a different task. Repeat the
 flag to run several named tasks in one job. `--n-concurrent` is the number of concurrent sandboxes while
-`--n-attempts` is the number of attemps on the same task. Rewards are averaged by the number of attempts
+`--n-attempts` is the number of attempts on the same task. Rewards are averaged by the number of attempts.
 
 Or run it with the config file:
 ```bash
@@ -36,7 +36,7 @@ PYTHONPATH=. uv run --group evals harbor run \
 ```
 
 To run the Ness SDK through the ChatGPT-authenticated Codex model, use the
-separate Codex config. `CODEX_FORCE_AUTH_JSON=true` makes the adapter read
+separate Codex config. `CODEX_AUTH_JSON=true` makes the adapter read
 `~/.codex/auth.json` on the host, upload it only for the agent phase, and remove
 the temporary copy when the trial ends:
 

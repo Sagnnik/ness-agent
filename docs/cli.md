@@ -258,7 +258,7 @@ Shift+Tab toggles plan/act mode without rebuilding the graph or invalidating the
 - `/goal <objective>`: run up to three worker attempts, each followed by an isolated read-only judge. Failed verdicts become repair instructions for the next attempt.
 - `/save`: archive the current thread with a headline summary.
 - `/new`: archive and start a fresh thread. During an active turn, the running thread stays in the background and the new thread starts independently.
-- `/compact`: request a cache-safe summary at the next model boundary; the active user/tool turn remains verbatim.
+- `/compact`: request a cache-safe summary at the next model boundary; the active user/tool turn remains verbatim unless it exceeds the retained-suffix budget, in which case older in-turn work is summarized and a coherent recent suffix is kept.
 - `/reflection`: immediately reflect on conversation messages added since the last successful reflection and update session memory.
 - `/export <path.html>`: write the current durable session as a self-contained, interactive HTML transcript. The export retains events from before compactions, includes an in-page normalized JSONL download, omits pasted image bytes, and refuses to overwrite an existing file. Quote paths that contain spaces.
 

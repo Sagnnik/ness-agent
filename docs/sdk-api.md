@@ -200,7 +200,7 @@ The registry owns known tools and the currently bound active set. Core reads are
 
 `set_mcp_catalog()` and `deferred_mcp_summary()` maintain the lightweight deferred-MCP prompt catalog. `is_destructive(name, args)` and `is_read_only(name, args)` expose the registry’s policy classification. `coding_tools()` is the small convenience factory for name-selected SDK tools.
 
-The default tool list includes file read/write/delete/edit/glob, search, web fetch/search, shell, todos, tool discovery, subagents, questions, and skill viewing. It is not an API guarantee for every named tool; configure an explicit tool sequence when a host application needs a narrower contract.
+The default tool list includes file read/write/delete/edit/glob, search, web fetch/search, shell, todos, tool discovery, subagents, questions, and skill viewing. In vision-capable sessions, `read` normalizes supported raster files and returns structured image content; PDFs and videos must first be rendered or split into raster frames. Image payloads are redacted from durable and display-facing events. This is not an API guarantee for every named tool; configure an explicit tool sequence when a host application needs a narrower contract.
 
 ### `PermissionStore`
 

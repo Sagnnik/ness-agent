@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Compaction can now summarize inside a long active turn. When the current continuation exceeds a retained-suffix budget (about 40% of usable context, clamped between 8k and 65k tokens), older in-turn work is summarized while a coherent recent suffix is kept verbatim, without splitting a tool-call batch from its results. Later tool loops treat the compacted-history boundary as the start of that continuation.
 
+### Fixed
+
+- Oversized active continuations now fail explicitly when no safe retained suffix can fit, instead of reaching the provider with an over-budget request. Compaction-call usage is isolated from parent-call context accounting, and image blocks receive a bounded token allowance without persisting their base64 payloads.
+
 ## [0.2.3] - 2026-08-23 — Released
 
 ### Added
