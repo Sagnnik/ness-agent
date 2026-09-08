@@ -1,6 +1,6 @@
 # SDK API reference
 
-This reference covers the symbols exported by `ness_agent.__all__` in the 0.2.3 source tree. It is intentionally an API map rather than a second tutorial: start with the [SDK guide](sdk.md) for the shortest working example, then use this page when choosing a seam to own.
+This reference covers the symbols exported by `ness_agent.__all__` in the 0.2.4 source tree. It is intentionally an API map rather than a second tutorial: start with the [SDK guide](sdk.md) for the shortest working example, then use this page when choosing a seam to own.
 
 > **0.x experimental.** Names and signatures below describe the current public surface; pin a version before relying on it in production.
 

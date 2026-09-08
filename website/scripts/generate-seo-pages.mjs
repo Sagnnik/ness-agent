@@ -19,6 +19,13 @@ const CONTENT_DIR = path.join(WEBSITE_DIR, 'content', 'blog')
 
 const NEWS = [
   {
+    slug: 'image-aware-reads-and-mid-turn-compaction',
+    title: 'Image-aware reads and resilient long-turn compaction',
+    description:
+      'Send local raster images through the read tool, compact oversized active turns safely, and run Terminal-Bench through Harbor adapters.',
+    date: '2026-09-08',
+  },
+  {
     slug: 'session-isolation-and-opencode-go',
     title: 'Per-session isolation, OpenCode Go, and Codex cache fixes',
     description:

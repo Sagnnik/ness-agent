@@ -15,7 +15,7 @@ const OVERVIEW = `# Ness Agent documentation
 
 Ness Agent is an experimental, hackable coding-agent harness for engineers who want to **own the loop**. One package contains the Python SDK for embedding the loop and **Ness**, the terminal operator surface for coding sessions.
 
-> **0.x experimental** — public APIs may change until 1.0. Pin versions in production and follow the changelog when upgrading. Current release: **0.2.3**.
+> **0.x experimental** — public APIs may change until 1.0. Pin versions in production and follow the changelog when upgrading. Current release: **0.2.4**.
 
 ## Two surfaces, one harness
 
@@ -34,15 +34,14 @@ pip install ness-agent                              # SDK in a project environme
 ness --version                                      # verify the install
 \`\`\`
 
-## What's new in 0.2.3
+## What's new in 0.2.4
 
-- **Per-session isolation** — concurrent \`/threads\` and \`/new\` runtimes keep separate models, permissions, MCP activation, callbacks, and cost totals.
-- **OpenCode Go** — built-in provider with live model discovery, per-model routing, and rolling subscription usage in \`/status\`.
-- **Session-scoped models** — \`Session.configure_models()\` and \`NessAgent.configure_default_models()\` rebind one session or future defaults without affecting siblings.
-- **Session-first costs** — resume, fork, and rollback preserve or exclude historical spend without double-counting.
-- **Codex cache keys** — one stable UUID per thread for \`prompt_cache_key\`, with per-call cache diagnostics and clearer backend validation errors.
+- **Image-aware reads** — \`read()\` sends normalized raster images to vision models while keeping base64 payloads out of durable events, traces, hooks, and display output.
+- **Long-turn compaction** — older work inside an oversized active continuation can be summarized while a coherent recent tool-call suffix remains verbatim.
+- **Safer context limits** — over-budget continuations fail explicitly when no safe retained suffix can fit, and image blocks receive bounded token estimates.
+- **Harbor evals** — Terminal-Bench 2.1 adapters and configs support OpenRouter and ChatGPT-authenticated Codex runs on Modal.
 
-Full notes: [release dispatch](/news/session-isolation-and-opencode-go) · [changelog](../CHANGELOG.md).
+Full notes: [release dispatch](/news/image-aware-reads-and-mid-turn-compaction) · [changelog](../CHANGELOG.md).
 
 The guides below keep the repository documentation close to the product source.`
 

@@ -24,7 +24,7 @@ Landing experience is a **full-viewport TUI** inspired by the real Ness CLI, not
 | `/` | Redirect → `/v1b` |
 | `/v1b` | Canon TUI + red-accent navbar |
 | `/home` | Product overview using landing transcript narrative |
-| `/news`, `/news/:slug` | Release dispatches (newest first; currently v0.2.3 + v0.2.2 + v0.2.1 + v0.2.0 + v0.1.0) |
+| `/news`, `/news/:slug` | Release dispatches (newest first; currently v0.2.4 + v0.2.3 + v0.2.2 + v0.2.1 + v0.2.0 + v0.1.0) |
 | `/blog`, `/blog/:slug` | Folder-based markdown from `content/blog/<slug>/` |
 | `/docs`, `/docs/:section` | Overview · SDK · SDK API · CLI · Configuration · Architecture |
 

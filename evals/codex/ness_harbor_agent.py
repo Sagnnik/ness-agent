@@ -46,7 +46,7 @@ from harbor.models.trajectories import (
 class NessAgent(BaseInstalledAgent):
     SUPPORTS_ATIF: bool = True
     MODEL_CONNECTION = ModelConnectionSpec(passthrough=True)
-    NESS_VERSION: str = "0.2.3"
+    NESS_VERSION: str = "0.2.4"
     INSTRUCTION_PATH = EnvironmentPaths.agent_dir / "instruction.md"
     OUTPUT_PATH = EnvironmentPaths.agent_dir / "ness.txt"
     NESS_DIR = EnvironmentPaths.agent_dir / "ness"

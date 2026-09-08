@@ -97,7 +97,7 @@ export const TUI_STEPS: readonly TuiStep[] = [
     eyebrow: 'NESS // SESSION',
     kind: 'ready',
     lines: [
-      'ness-agent v0.2.3 initialized',
+      'ness-agent v0.2.4 initialized',
       'scroll, use arrow keys, or enter /help to inspect the harness',
     ],
   },

@@ -22,6 +22,39 @@ type Release = {
 
 const RELEASES: readonly Release[] = [
   {
+    slug: 'image-aware-reads-and-mid-turn-compaction',
+    title: 'Image-aware reads and resilient long-turn compaction',
+    date: '2026-09-08',
+    version: 'v0.2.4',
+    summary:
+      'Send local raster images through the read tool, compact oversized active turns safely, and run Terminal-Bench through Harbor adapters.',
+    sectionLabel: '00.2.4 // ADDED',
+    intro:
+      '0.2.4 makes media part of the normal tool loop and keeps long-running sessions inside their context budget without leaking image payloads into durable records.',
+    highlights: [
+      [
+        'Image-aware read tool',
+        'read() normalizes PNG, JPEG, WebP, GIF, PPM, BMP, and TIFF files and forwards structured image content to vision-capable models.',
+      ],
+      [
+        'Privacy-safe media flow',
+        'Base64 image payloads stay out of hooks, SQLite events, traces, TUI tool output, and compaction checkpoints while the model still receives the image.',
+      ],
+      [
+        'Mid-turn compaction',
+        'Older work inside a long active continuation can be summarized while a coherent recent suffix remains verbatim and tool calls stay paired with their results.',
+      ],
+      [
+        'Context safeguards',
+        'Oversized continuations fail explicitly when no safe suffix can fit; image estimates and isolated compaction usage keep pressure accounting bounded.',
+      ],
+      [
+        'Terminal-Bench adapters',
+        'Harbor adapters and configs run Ness through OpenRouter or ChatGPT-authenticated Codex on Terminal-Bench 2.1 environments.',
+      ],
+    ],
+  },
+  {
     slug: 'session-isolation-and-opencode-go',
     title: 'Per-session isolation, OpenCode Go, and Codex cache fixes',
     date: '2026-08-23',
