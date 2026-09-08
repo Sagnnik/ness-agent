@@ -7,6 +7,47 @@ from ness_agent.context.budget import resolve_token_count
 from ness_agent.context.overlay import wrap_system_reminder
 from ness_agent.tools import ToolRegistry
 
+
+_IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image"})
+
+
+def _redact_persisted_media(value: Any) -> Any:
+    """Replace embedded image blocks in durable events with text markers."""
+    if isinstance(value, list):
+        return [_redact_persisted_media(item) for item in value]
+    if isinstance(value, dict):
+        if value.get("type") in _IMAGE_BLOCK_TYPES:
+            return {"type": "text", "text": "[image]"}
+        return {key: _redact_persisted_media(item) for key, item in value.items()}
+    return value
+
+
+def _normalize_tool_result(result: Any) -> tuple[str | list[dict[str, Any]], str]:
+    """Keep model-facing content blocks while producing a safe text representation."""
+    if not isinstance(result, list):
+        text = str(result)
+        return text, text
+
+    content: list[dict[str, Any]] = []
+    display_parts: list[str] = []
+    for item in result:
+        if not isinstance(item, dict):
+            text = str(result)
+            return text, text
+        block = dict(item)
+        block_type = block.get("type")
+        if block_type in _IMAGE_BLOCK_TYPES:
+            content.append(block)
+            display_parts.append("[image]")
+        elif block_type in {"text", "input_text", "output_text"} and "text" in block:
+            content.append(block)
+            display_parts.append(str(block["text"]))
+        else:
+            text = str(result)
+            return text, text
+    return content, "\n".join(display_parts)
+
+
 def _effective_conversation(messages, state) -> list[BaseMessage]:
     """
     Build the effective message list at every turn

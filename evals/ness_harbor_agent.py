@@ -203,8 +203,9 @@ class NessAgent(BaseInstalledAgent):
             kind = event.get("kind")
 
             if kind == "usage":
-                pending_usage.append(event)
                 all_usage.append(event)
+                if event.get("operation") != "compaction":
+                    pending_usage.append(event)
                 event_model = event.get("model")
 
                 if isinstance(event_model, str) and event_model and event_model != "*":

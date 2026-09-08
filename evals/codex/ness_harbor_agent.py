@@ -181,56 +181,58 @@ class NessAgent(BaseInstalledAgent):
 
         remote_secret_dir = self.CODEX_SECRET_DIR
         remote_auth_path = f"{remote_secret_dir}/auth.json"
-        await self.exec_as_root(
-            environment,
-            command=(
-                f"mkdir -p {shlex.quote(remote_secret_dir)} "
-                f"{shlex.quote(self.CODEX_CONFIG_DIR + '/codex')}"
-            ),
-        )
-        # Do not upload the refresh token
-        fd, staged_name = tempfile.mkstemp(
-            prefix="ness-codex-auth-", suffix=".json"
-        )
-        os.close(fd)
-        staged_auth_path = Path(staged_name)
-        staged_auth_path.write_text(self._minimal_codex_auth(auth_path), encoding="utf-8")
-        os.chmod(staged_auth_path, 0o600)
         try:
-            await environment.upload_file(staged_auth_path, remote_auth_path)
-        finally:
-            staged_auth_path.unlink(missing_ok=True)
-            staged_auth_path = None
-        if environment.default_user is not None:
             await self.exec_as_root(
                 environment,
                 command=(
-                    f"chown {shlex.quote(str(environment.default_user))} "
-                    f"{shlex.quote(remote_auth_path)}"
+                    f"mkdir -p {shlex.quote(remote_secret_dir)} "
+                    f"{shlex.quote(self.CODEX_CONFIG_DIR + '/codex')}"
                 ),
             )
-        await self.exec_as_root(
-            environment,
-            command=(
-                f"chmod 600 {shlex.quote(remote_auth_path)} && "
-                f"ln -sf {shlex.quote(remote_auth_path)} "
-                f"{shlex.quote(self.CODEX_CONFIG_DIR + '/codex/auth.json')}"
-            ),
-        )
+            # Do not upload the refresh token.
+            fd, staged_name = tempfile.mkstemp(
+                prefix="ness-codex-auth-", suffix=".json"
+            )
+            os.close(fd)
+            staged_auth_path = Path(staged_name)
+            staged_auth_path.write_text(
+                self._minimal_codex_auth(auth_path), encoding="utf-8"
+            )
+            os.chmod(staged_auth_path, 0o600)
+            try:
+                await environment.upload_file(staged_auth_path, remote_auth_path)
+            finally:
+                staged_auth_path.unlink(missing_ok=True)
+                staged_auth_path = None
+            if environment.default_user is not None:
+                await self.exec_as_root(
+                    environment,
+                    command=(
+                        f"chown {shlex.quote(str(environment.default_user))} "
+                        f"{shlex.quote(remote_auth_path)}"
+                    ),
+                )
+            await self.exec_as_root(
+                environment,
+                command=(
+                    f"chmod 600 {shlex.quote(remote_auth_path)} && "
+                    f"ln -sf {shlex.quote(remote_auth_path)} "
+                    f"{shlex.quote(self.CODEX_CONFIG_DIR + '/codex/auth.json')}"
+                ),
+            )
 
-        cwd = environment.task_env_config.workdir
-        command = (
-            "set -euo pipefail; "
-            'export PATH="$HOME/.local/bin:$PATH"; '
-            'tool_root="$(uv tool dir)"; '
-            'ness_python="$tool_root/ness-agent/bin/python"; '
-            'test -x "$ness_python"; '
-            f'"$ness_python" {shlex.quote(self.NESS_SCRIPT_PATH.as_posix())} '
-            f'< {shlex.quote(self.INSTRUCTION_PATH.as_posix())} '
-            f'2>&1 | stdbuf -oL tee {shlex.quote(self.OUTPUT_PATH.as_posix())}'
-        )
+            cwd = environment.task_env_config.workdir
+            command = (
+                "set -euo pipefail; "
+                'export PATH="$HOME/.local/bin:$PATH"; '
+                'tool_root="$(uv tool dir)"; '
+                'ness_python="$tool_root/ness-agent/bin/python"; '
+                'test -x "$ness_python"; '
+                f'"$ness_python" {shlex.quote(self.NESS_SCRIPT_PATH.as_posix())} '
+                f'< {shlex.quote(self.INSTRUCTION_PATH.as_posix())} '
+                f'2>&1 | stdbuf -oL tee {shlex.quote(self.OUTPUT_PATH.as_posix())}'
+            )
 
-        try:
             await self.exec_as_agent(environment, command, env, cwd)
         finally:
             if staged_auth_path is not None:
@@ -318,8 +320,9 @@ class NessAgent(BaseInstalledAgent):
             kind = event.get("kind")
 
             if kind == "usage":
-                pending_usage.append(event)
                 all_usage.append(event)
+                if event.get("operation") != "compaction":
+                    pending_usage.append(event)
                 event_model = event.get("model")
 
                 if isinstance(event_model, str) and event_model and event_model != "*":

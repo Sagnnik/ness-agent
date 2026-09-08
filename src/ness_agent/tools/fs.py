@@ -36,10 +36,15 @@ def _relative_to_root(path: str) -> str:
 def _project_root() -> Path:
     return get_session_context().project_root
 
+
+def _is_pdf(path: Path, raw: bytes) -> bool:
+    return path.suffix.lower() == ".pdf" or raw.startswith(b"%PDF-")
+
+
 def _unsupported_binary_message(path: Path, raw: bytes) -> str:
     suffix = path.suffix.lower()
     
-    if suffix == ".pdf" or raw.startswith(b"%PDF-"):
+    if _is_pdf(path, raw):
         return (
             "Unsupported PDF file. Render selected pages to PNG/JPEG with PyMuPDF, "
             "then pass them as base64 images in the image_url content block."
@@ -97,6 +102,9 @@ def read(path: str, offset: int = 1, limit: int | None = None) -> str | list[dic
                     },
                 },
             ]
+
+        if _is_pdf(target, raw):
+            return f"Error: {_unsupported_binary_message(target, raw)}"
 
         try:
             decoded = raw.decode("utf-8")

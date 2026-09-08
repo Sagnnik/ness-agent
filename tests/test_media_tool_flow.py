@@ -9,7 +9,7 @@ from PIL import Image
 
 from ness_agent import NessAgent, PromptLayers, PromptLayersConfig
 from ness_agent.context.budget import IMAGE_TOKEN_ALLOWANCE, content_text, resolve_token_count
-from ness_agent.graph.nodes import _normalize_tool_result
+from ness_agent.graph.helpers import _normalize_tool_result
 from ness_agent.hooks import Hook
 from ness_agent.options import NessAgentOptions
 from ness_agent.session import _tool_end_data

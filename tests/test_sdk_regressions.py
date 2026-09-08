@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -636,6 +637,86 @@ def test_compaction_retains_multi_step_active_tool_trajectory(tmp_path: Path):
     durable = messages_from_dict(checkpoint["active_suffix"])
     assert [message.type for message in durable] == ["human", "ai", "tool"]
     assert durable[-1].tool_call_id == "call-1"
+
+
+def test_over_limit_single_active_turn_fails_before_model_invocation(tmp_path: Path):
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-over-limit-active-turn",
+        mode="act",
+        git_available=False,
+    )
+    binding = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="unused")))
+    rt.last_bound_model = binding
+    pressure = ContextPressure(
+        token_count=120_000,
+        context_limit=120_000,
+        ratio=1.0,
+        warning=True,
+        should_compact=True,
+        safety_threshold_reached=True,
+        hard_threshold_reached=True,
+    )
+
+    with (
+        patch("ness_agent.graph.nodes.calculate_context_pressure", return_value=pressure),
+        pytest.raises(RuntimeError, match="active turn is too large to fit safely"),
+    ):
+        asyncio.run(rt.context_gate({
+            "messages": [HumanMessage(content="one indivisible request")],
+            "mode": "act",
+        }))
+
+    binding.ainvoke.assert_not_awaited()
+
+
+def test_compaction_checkpoint_redacts_retained_images(tmp_path: Path):
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-redacted-image-checkpoint",
+        mode="act",
+        git_available=False,
+    )
+    rt.last_bound_model = SimpleNamespace(
+        ainvoke=AsyncMock(return_value=AIMessage(content="summary"))
+    )
+    data_url = "data:image/png;base64,SECRET_IMAGE_DATA"
+    image_result = ToolMessage(
+        content=[
+            {"type": "text", "text": "Read image: screenshot.png"},
+            {
+                "type": "image_url",
+                "image_url": {"url": data_url, "detail": "high"},
+            },
+        ],
+        name="read",
+        tool_call_id="read-image",
+        additional_kwargs={"display_text": "Read image: screenshot.png\n[image]"},
+    )
+    updates = asyncio.run(rt.context_gate({
+        "messages": [
+            HumanMessage(content="completed task"),
+            AIMessage(content="completed answer"),
+            HumanMessage(content="inspect the screenshot"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "read", "args": {}, "id": "read-image"}],
+            ),
+            image_result,
+        ],
+        "force_compact": True,
+        "mode": "act",
+    }))
+
+    checkpoint = agent.config.thread_store.load_thread_events(
+        "session-redacted-image-checkpoint"
+    )[-1]
+    assert "SECRET_IMAGE_DATA" not in json.dumps(checkpoint)
+    durable_suffix = messages_from_dict(checkpoint["active_suffix"])
+    assert durable_suffix[-1].content[-1] == {"type": "text", "text": "[image]"}
+    assert updates["model_context_messages"][-1].content[-1]["image_url"]["url"] == data_url
 
 
 def test_active_turn_split_keeps_parallel_tool_batch_atomic():

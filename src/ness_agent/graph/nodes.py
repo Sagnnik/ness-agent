@@ -27,6 +27,8 @@ from ness_agent.graph.helpers import (
     _reflection_token_delta,
     extract_tool_calls,
     _tool_event,
+    _redact_persisted_media,
+    _normalize_tool_result,
 )
 from ness_agent.compaction import _invoke_summary
 from ness_agent.context.budget import (
@@ -95,31 +97,6 @@ class NodesRuntime:
         self.metadata: Mapping[str, Any] = metadata if metadata is not None else {}
         self.last_bound_model = None
 
-
-def _normalize_tool_result(result: Any) -> tuple[str | list[dict[str, Any]], str]:
-    """Keep model-facing content blocks while producing a safe text representation."""
-    if not isinstance(result, list):
-        text = str(result)
-        return text, text
-
-    content: list[dict[str, Any]] = []
-    display_parts: list[str] = []
-    for item in result:
-        if not isinstance(item, dict):
-            text = str(result)
-            return text, text
-        block = dict(item)
-        block_type = block.get("type")
-        if block_type in {"image_url", "image", "input_image"}:
-            content.append(block)
-            display_parts.append("[image]")
-        elif block_type in {"text", "input_text", "output_text"} and "text" in block:
-            content.append(block)
-            display_parts.append(str(block["text"]))
-        else:
-            text = str(result)
-            return text, text
-    return content, "\n".join(display_parts)
 
 def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadata = None) -> NodesRuntime:
     rt = NodesRuntime(config, thread_id=thread_id, mode=mode, git_available=git_available, metadata=metadata)
@@ -289,6 +266,11 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         if not summarize_semantic:
             status["skip_reason"] = "no_completed_history"
             status["forced"] = forced
+            if pressure.safety_threshold_reached:
+                raise RuntimeError(
+                    "The active turn is too large to fit safely and there is no "
+                    "completed history to summarize."
+                )
             return updates
 
         # same system message and model for prefix caching
@@ -387,7 +369,9 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             "after_tokens": after_tokens,
             "active_suffix_messages": len(retained_semantic),
             "active_suffix": json.loads(json.dumps(
-                [message_to_dict(message) for message in retained_semantic],
+                _redact_persisted_media(
+                    [message_to_dict(message) for message in retained_semantic]
+                ),
                 ensure_ascii=False,
                 default=str,
             )),

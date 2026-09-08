@@ -168,13 +168,16 @@ class ReadFileTests(SessionContextTestMixin, unittest.TestCase):
         self.assertIn("UTF-8 text or a raster image", result)
 
     def test_pdf_and_video_errors_suggest_conversion_tools(self) -> None:
-        (self.root / "report.pdf").write_bytes(b"%PDF-1.7\n\xff")
+        (self.root / "report.pdf").write_bytes(
+            b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
+        )
         (self.root / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42\xff")
 
         pdf_result = read.invoke({"path": "report.pdf"})
         video_result = read.invoke({"path": "clip.mp4"})
 
         self.assertIn("PyMuPDF", pdf_result)
+        self.assertNotIn("1| %PDF", pdf_result)
         self.assertIn("ffmpeg or OpenCV", video_result)
 
     def test_rejects_large_file_before_reading_it(self) -> None:
