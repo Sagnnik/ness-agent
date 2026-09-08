@@ -33,7 +33,9 @@ _ROLE_BY_TYPE: dict[str, str] = {
 # These are replaced with a short text marker to avoid base64-bloating the
 # span attribute payload. Backend chat UIs (Langfuse, Arize) cannot render
 # inline images from span attributes anyway.
-_MEDIA_BLOCK_TYPES: frozenset[str] = frozenset({"image_url", "input_audio", "image"})
+_MEDIA_BLOCK_TYPES: frozenset[str] = frozenset(
+    {"image_url", "input_image", "input_audio", "image"}
+)
 
 
 def _sanitize_content_blocks(blocks: list) -> list:

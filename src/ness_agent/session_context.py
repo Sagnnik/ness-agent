@@ -22,6 +22,7 @@ class SessionContext:
     project_root: Path
     agent_config: NessAgentConfig | None = None
     all_skills: dict[str, Any] | None = None
+    vision: bool | None = None
 
 
 _session_ctx: ContextVar[SessionContext | None] = ContextVar("ness_agent_session_context", default=None)

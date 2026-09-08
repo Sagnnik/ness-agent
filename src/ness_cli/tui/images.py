@@ -10,7 +10,6 @@ re-reading the file.
 
 from __future__ import annotations
 
-import base64
 import io
 import os
 import re
@@ -21,14 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-_MAX_LONG_EDGE = 2000
-_MAX_BYTES = 5 * 1024 * 1024
-
-_PNG_MIME = "image/png"
-
-
-class ImageTooLarge(Exception):
-    """Raised when the re-encoded PNG exceeds the 5 MB ceiling."""
+from ness_agent.media import ImageTooLarge, normalize_image, png_data_url
 
 
 class NoClipboardImage(Exception):
@@ -173,23 +165,8 @@ def _grab_imagegrab() -> bytes:
 
 def process_image(raw: bytes) -> bytes:
     """Resize (long edge <= 2000px) and re-encode to PNG. Reject if > 5 MB."""
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(raw))
-    img = img.convert("RGB")
-    w, h = img.size
-    long_edge = max(w, h)
-    if long_edge > _MAX_LONG_EDGE:
-        scale = _MAX_LONG_EDGE / long_edge
-        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    out = buf.getvalue()
-    if len(out) > _MAX_BYTES:
-        raise ImageTooLarge(
-            f"image is {len(out)} bytes after resize; max is {_MAX_BYTES}"
-        )
-    return out
+    processed, _width, _height = normalize_image(raw)
+    return processed
 
 
 def save_clipboard_image() -> tuple[Path, str] | None:
@@ -212,5 +189,4 @@ def save_clipboard_image() -> tuple[Path, str] | None:
 
 
 def _bytes_to_data_url(data: bytes) -> str:
-    encoded = base64.b64encode(data).decode("ascii")
-    return f"data:{_PNG_MIME};base64,{encoded}"
+    return png_data_url(data)

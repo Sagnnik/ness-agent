@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image-aware `read()` for vision models: PNG, JPEG, WebP, GIF, PPM, BMP, and TIFF files are normalized (EXIF orientation, 2000px long edge, PNG re-encode, 5 MB ceiling) and returned as structured text plus image blocks. Codex and OpenRouter project those tool results into the next model request; text-only sessions get a visible omission instead of a data URL. Base64 stays out of hooks, SQLite events, traces, TUI `tool_end` payloads, and token estimates. PDFs and videos remain unsupported, with a hint to render or extract frames and `read()` the resulting images.
+- Harbor eval adapters for Terminal-Bench 2.1: OpenRouter (`evals.ness_harbor_agent:NessAgent`) and ChatGPT-authenticated Codex (`evals/codex`), plus configs and a `tb_bench.py` runner for the v0.2.3 text-only Codex baseline.
+
+### Changed
+
+- Compaction can now summarize inside a long active turn. When the current continuation exceeds a retained-suffix budget (about 40% of usable context, clamped between 8k and 65k tokens), older in-turn work is summarized while a coherent recent suffix is kept verbatim, without splitting a tool-call batch from its results. Later tool loops treat the compacted-history boundary as the start of that continuation.
+
+### Fixed
+
+- Oversized active continuations now fail explicitly when no safe retained suffix can fit, instead of reaching the provider with an over-budget request. Compaction-call usage is isolated from parent-call context accounting, and image blocks receive a bounded token allowance without persisting their base64 payloads.
+
+## [0.2.3] - 2026-08-23 — Released
+
+### Added
+
 - OpenCode Go as a built-in CLI model provider, with per-model Responses, Chat Completions, and Anthropic Messages routing, live model discovery, separate API-key storage, and rolling 5-hour/weekly/monthly subscription usage in `/status`.
 - Per-session effective SDK configuration: `NessAgent.session()` now accepts main and reflection model overrides, `Session.config` / `Session.cost_tracker` expose the effective session view, and `Session.configure_models()` can rebind one live session without changing its siblings.
 - `NessAgent.configure_default_models()` for updating the model defaults inherited by sessions created in the future.

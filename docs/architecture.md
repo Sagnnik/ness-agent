@@ -69,6 +69,13 @@ Session tool tiers (same set bound in both modes):
 - Advanced: `spawn_subagent`
 - Loaded MCP tools: any `mcp__*` tool activated this session (deferred by default; load via `search_tools`/`add_tools` or `/mcp <server> [tool]`)
 
+For vision-capable sessions, `read` accepts PNG, JPEG, WebP, GIF, PPM, BMP,
+and TIFF files and returns a normalized image block to the model. Images are
+oriented from EXIF metadata, resized to a 2000px maximum long edge, encoded as
+PNG, and rejected if the normalized payload exceeds 5 MB. Text-only sessions
+receive an explicit omission marker. PDFs and videos are not passed directly;
+render PDF pages or extract video frames to a supported raster format first.
+
 ---
 
 ## Memory
@@ -106,8 +113,8 @@ Compaction is a cache-safe fork of the main conversation. At every boundary befo
 | 70-80% | Warn that summary compaction is approaching |
 | >= 80% | Summarize completed history |
 
-Compaction also runs earlier when necessary to preserve `COMPACTION_BUFFER_TOKENS` for the instruction and capped summary output. The latest unanswered user turn and its complete assistant/tool trajectory remain verbatim; only completed history is summarized. Old L3 reminders are visible to the cache-safe fork but explicitly excluded from summary semantics. The replacement branch contains one human `<compacted-history>` message, the active suffix, and one newly rendered current L3 reminder.
+Compaction also runs earlier when necessary to preserve `COMPACTION_BUFFER_TOKENS` for the instruction and capped summary output. Normally the latest unanswered user turn and its assistant/tool trajectory remain verbatim. If that continuation itself exceeds about 40% of usable context (clamped between 8k and 65k tokens), Ness summarizes its older work and retains a coherent recent suffix without splitting a tool-call batch from its results. Old L3 reminders are visible to the cache-safe fork but explicitly excluded from summary semantics. The replacement branch contains one human `<compacted-history>` message, the retained active suffix, and one newly rendered current L3 reminder.
 
 Image-bearing user messages remain structured in live and replayed canonical history after they are answered. They are removed only when their completed turn is replaced by summary compaction (or when vision is explicitly disabled).
 
-Compaction is a separate graph node between `START`/`tools` and `agent`, so it never runs during tool execution and its state checkpoints before the next model request. Summary failures preserve the original history and may continue below the safety boundary; at the boundary the turn stops rather than using a lossy fallback. `/compact` forces this process at the next model boundary.
+Compaction is a separate graph node between `START`/`tools` and `agent`, so it never runs during tool execution and its state checkpoints before the next model request. Summary-call usage is isolated from the parent agent call so it cannot distort later context-pressure accounting. Summary failures preserve the original history and may continue below the safety boundary; at the boundary the turn stops rather than using a lossy fallback. If no safe retained suffix can fit, the turn fails explicitly instead of sending an oversized request. `/compact` forces this process at the next model boundary.

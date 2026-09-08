@@ -25,6 +25,20 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, PrivateAttr
 
 
+def _image_source(url: str) -> dict[str, str]:
+    """Convert image data URLs to Anthropic's base64 source shape."""
+    header, separator, data = url.partition(",")
+    if separator and header.startswith("data:") and ";base64" in header:
+        media_type = header[5:].split(";", 1)[0]
+        if media_type.startswith("image/"):
+            return {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            }
+    return {"type": "url", "url": url}
+
+
 class OpenRouterAnthropicMessages(BaseChatModel):
     """LangChain chat model backed by OpenRouter's Anthropic Messages API."""
 
@@ -129,9 +143,7 @@ class OpenRouterAnthropicMessages(BaseChatModel):
             if block.get("type") == "image_url":
                 value = block.get("image_url") or {}
                 url = value.get("url") if isinstance(value, dict) else value
-                blocks.append(
-                    {"type": "image", "source": {"type": "url", "url": str(url)}}
-                )
+                blocks.append({"type": "image", "source": _image_source(str(url))})
             else:
                 blocks.append(dict(block))
         return blocks
@@ -170,6 +182,11 @@ class OpenRouterAnthropicMessages(BaseChatModel):
                         )
                 converted.append({"role": "assistant", "content": blocks})
             elif isinstance(message, ToolMessage):
+                content = (
+                    message.content
+                    if isinstance(message.content, str)
+                    else self._content_blocks(message.content)
+                )
                 converted.append(
                     {
                         "role": "user",
@@ -177,7 +194,7 @@ class OpenRouterAnthropicMessages(BaseChatModel):
                             {
                                 "type": "tool_result",
                                 "tool_use_id": message.tool_call_id,
-                                "content": str(message.content),
+                                "content": content,
                             }
                         ],
                     }

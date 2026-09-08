@@ -1,14 +1,18 @@
-Create a concise continuation summary of the completed conversation above.
+Create a concise continuation checkpoint for the conversation above.
 
-Preserve actionable state and facts: the user's goal and constraints, decisions and their reasons, work completed, files changed or inspected, failures that must not be repeated, unresolved blockers, and the exact next steps. Discard conversational filler and raw tool output unless it contains an important result or error.
+Preserve actionable state and facts. Distinguish commands that completed with a known exit status from partial output and unverified observations. Discard conversational filler and raw tool output unless it contains an important result or error.
 
 Use these exact sections:
 
-**Goal:** [Core objective and strict constraints]
-**Progress & Decisions:** [Completed work and architectural decisions]
-**Key Files:** [Relevant files and their current status]
-**Blockers & Failed Attempts:** [Unresolved errors and failed approaches]
-**Status:** [Whether the definition of done is met or still open]
-**Next Steps:** [Immediate continuation actions]
+**Original Request:** [The user's request]
+**Constraints & Acceptance Criteria:** [Strict requirements and definition of done]
+**Completed Work:** [Finished work and decisions with reasons]
+**Current Operation:** [What is in progress now]
+**Key Files:** [Files modified or inspected and their current status]
+**Commands & Jobs:** [Commands, process or job IDs, log paths, and current status]
+**Verified Results:** [Results backed by a completed command and its exit status]
+**Partial Observations:** [Unverified output, incomplete commands, and tentative findings]
+**Errors & Rejected Approaches:** [Failures and approaches that must not be repeated]
+**Next Step:** [The immediate continuation action]
 
 Do not call tools. Output only the summary.

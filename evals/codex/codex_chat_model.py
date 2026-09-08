@@ -15,9 +15,113 @@ from ness_cli.provider.codex.auth import CodexAuth
 from ness_cli.provider.codex.transport import CodexResponsesTransport
 
 
-class CodexSubscriptionChatModel(BaseChatModel):
-    """LangChain model using ChatGPT credentials managed by Codex app-server."""
+CODEX_API_PRICING: dict[str, dict[str, float]] = {
+    "gpt-5.6-sol": {
+        "input": 4.00,
+        "cached_input": 0.40,
+        "cache_write": 5.00,
+        "output": 20.00,
+    },
+    "gpt-5.6-terra": {
+        "input": 2.00,
+        "cached_input": 0.20,
+        "cache_write": 2.50,
+        "output": 12.00,
+    },
+    "gpt-5.6-luna": {
+        "input": 0.20,
+        "cached_input": 0.02,
+        "cache_write": 0.25,
+        "output": 1.20,
+    },
+}
 
+
+# The Codex CLI model catalog reports this as the active context window for
+# the GPT-5.6 Codex models. Keep this metadata in the eval bundle because the
+# Harbor sandbox installs the Ness package separately from these uploaded
+# adapter files.
+CODEX_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-5.6-sol": 272_000,
+    "gpt-5.6-terra": 272_000,
+    "gpt-5.6-luna": 272_000,
+}
+
+
+def context_window_for_model(model: str | None) -> int | None:
+    if not model:
+        return None
+    normalized = model.strip().lower()
+    if normalized == "gpt-5.6":
+        normalized = "gpt-5.6-sol"
+    if normalized in CODEX_CONTEXT_WINDOWS:
+        return CODEX_CONTEXT_WINDOWS[normalized]
+    for model_id, window in CODEX_CONTEXT_WINDOWS.items():
+        if normalized.startswith(model_id + "-"):
+            return window
+    return None
+
+
+def _pricing_for_model(model: str) -> dict[str, float] | None:
+    normalized = model.strip().lower()
+    if normalized == "gpt-5.6":
+        normalized = "gpt-5.6-sol"
+    if normalized in CODEX_API_PRICING:
+        return CODEX_API_PRICING[normalized]
+    for model_id in CODEX_API_PRICING:
+        if normalized.startswith(model_id + "-"):
+            return CODEX_API_PRICING[model_id]
+    return None
+
+
+def _estimate_api_cost(
+    model: str,
+    usage: dict[str, Any],
+) -> float | None:
+    pricing = _pricing_for_model(model)
+    if pricing is None:
+        return None
+
+    details = usage.get("input_tokens_details") or {}
+    input_tokens = int(usage.get("input_tokens") or 0)
+    cached_tokens = min(
+        max(int(details.get("cached_tokens") or 0), 0),
+        input_tokens,
+    )
+    uncached_tokens = max(input_tokens - cached_tokens, 0)
+    cache_write_tokens = min(
+        max(
+            int(
+                details.get("cache_write_tokens")
+                or details.get("cache_creation")
+                or 0
+            ),
+            0,
+        ),
+        uncached_tokens,
+    )
+    output_tokens = max(int(usage.get("output_tokens") or 0), 0)
+
+    input_rate = pricing["input"]
+    cached_rate = pricing["cached_input"]
+    cache_write_rate = pricing["cache_write"]
+    output_rate = pricing["output"]
+    if input_tokens > 272_000:
+        input_rate *= 2.0
+        cached_rate *= 2.0
+        cache_write_rate *= 2.0
+        output_rate *= 1.5
+
+    regular_uncached_tokens = uncached_tokens - cache_write_tokens
+    return (
+        regular_uncached_tokens * input_rate
+        + cached_tokens * cached_rate
+        + cache_write_tokens * cache_write_rate
+        + output_tokens * output_rate
+    ) / 1_000_000
+
+
+class CodexChatModel(BaseChatModel):
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
     model_name: str = Field(alias="model")
@@ -51,8 +155,7 @@ class CodexSubscriptionChatModel(BaseChatModel):
         }
 
     def bind_tool_registry(self, registry: Any) -> BaseChatModel:
-        # make a deep copy of codex subscription chat model; avoid modifying the original instance
-        clone = self.model_copy() # this is shallow copy
+        clone = self.model_copy()
         clone._auth = self._auth
         clone._transport = self._transport
         clone._tool_snapshot = [self._format_tool(tool) for tool in registry.active_tools]
@@ -70,7 +173,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
 
     @staticmethod
     def _format_tool(tool: dict[str, Any] | type | BaseTool) -> dict[str, Any]:
-        # convert the tool from langchain tool to OpenAI tool format
         converted = convert_to_openai_tool(tool)
         function = converted.get("function") or {}
         return {
@@ -83,7 +185,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
 
     @staticmethod
     def _content(content: Any, *, output: bool = False) -> list[dict[str, Any]]:
-        # converts message content into Responses-style content blocks
         text_type = "output_text" if output else "input_text"
         if isinstance(content, str):
             return [{"type": text_type, "text": content}] if content else []
@@ -103,7 +204,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
         return blocks
 
     def _input(self, messages: Sequence[BaseMessage]) -> tuple[str, list[dict[str, Any]]]:
-        # converts an entire LangChain conversation into the input format expected by Codex Responses request
         instructions: list[str] = []
         items: list[dict[str, Any]] = []
         for message in messages:
@@ -143,9 +243,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
         return "\n\n".join(instructions), items
 
     def _payload(self, messages: Sequence[BaseMessage], **kwargs: Any) -> dict[str, Any]:
-        # Takes those converted messages and builds the final request body. 
-        # It adds model name, instructions, conversation input, tool definitions, tool choice, reasoning effort, and max output tokens. 
-        # This is basically the last formatting step before the HTTP/transport layer.
         instructions, items = self._input(messages)
         supplied = kwargs.pop("tools", None)
         tools = self._tool_snapshot or [
@@ -160,15 +257,10 @@ class CodexSubscriptionChatModel(BaseChatModel):
             "parallel_tool_calls": True,
         }
         if self.prompt_cache_key:
-            # The key must remain stable for all requests that share a
-            # conversation prefix. The adapter scopes it to one thread (and
-            # to auxiliary model roles such as reflection).
             payload["prompt_cache_key"] = self.prompt_cache_key
         if tools:
             payload["tools"] = tools
             tool_choice = kwargs.pop("tool_choice", "auto")
-            # LangChain uses ``any`` for "at least one tool" while the
-            # Responses API names the same mode ``required``.
             payload["tool_choice"] = "required" if tool_choice == "any" else tool_choice
         if self.reasoning_effort and self.reasoning_effort != "none":
             payload["reasoning"] = {"effort": self.reasoning_effort, "summary": "auto"}
@@ -179,9 +271,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
 
     @staticmethod
     def _message(response: dict[str, Any]) -> AIMessage:
-        # _message() takes the raw response returned by Codex and turns it back into a LangChain AIMessage. 
-        # It extracts generated text, parses function calls, stores raw output items for future history replay, 
-        # and attaches token usage plus response metadata.
         text: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         raw_items = [dict(item) for item in response.get("output") or [] if isinstance(item, dict)]
@@ -207,8 +296,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
         if not text and response.get("output_text"):
             fallback_text = str(response["output_text"])
             text.append(fallback_text)
-            # Keep manual-history replay correct when the completed envelope
-            # omitted its message item but streaming still delivered text.
             raw_items.append(
                 {
                     "type": "message",
@@ -229,6 +316,14 @@ class CodexSubscriptionChatModel(BaseChatModel):
             "billing_mode": "subscription",
             "cache_write_tokens": cache_write,
         }
+        estimated_cost = _estimate_api_cost(
+            str(response.get("model") or ""),
+            usage,
+        )
+        if estimated_cost is not None:
+            response_metadata["cost"] = estimated_cost
+            response_metadata["cost_source"] = "estimated"
+            response_metadata["cost_basis"] = "openai-api-standard"
         if isinstance(cache_diagnostics, dict):
             response_metadata["cache_diagnostics"] = dict(cache_diagnostics)
         return AIMessage(
@@ -256,6 +351,8 @@ class CodexSubscriptionChatModel(BaseChatModel):
     ) -> ChatResult:
         del stop, run_manager
         response = await self._transport.create(self._payload(messages, **kwargs))
+        if not response.get("model"):
+            response["model"] = self.model_name
         return ChatResult(generations=[ChatGeneration(message=self._message(response))])
 
     def _generate(
@@ -266,3 +363,5 @@ class CodexSubscriptionChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         return asyncio.run(self._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs))
+
+CodexSubscriptionChatModel = CodexChatModel

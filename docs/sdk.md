@@ -56,6 +56,15 @@ asyncio.run(main())
 
 `tools=` accepts a mix of `BaseTool` instances, plain callables (auto-wrapped), and built-in name strings (`"read"`, `"grep"`, `"shell"`, …). Pass `overlay=NoOverlay()` to drop L3 entirely. Instruction bodies are importable — e.g. `from ness_agent.instructions import L0_HARNESS, PLAN_MODE`.
 
+In a vision-capable session, the built-in `read` tool returns supported raster
+images (PNG, JPEG, WebP, GIF, PPM, BMP, and TIFF) as structured image content.
+It applies EXIF orientation, limits the long edge to 2000px, re-encodes to PNG,
+and enforces a 5 MB normalized-payload ceiling. With `vision=False`, the model
+receives a visible omission marker instead. PDFs and videos must first be
+rendered or have frames extracted to a supported raster format. Persisted
+events, hooks, traces, and display events receive a redacted text form rather
+than the base64 image payload.
+
 ### Project agents and concurrent sessions
 
 A `NessAgent` is a project-scoped runtime: it owns shared persistence, memory, hooks, skill and tool catalogs, tracing, pricing, and defaults. Each call to `agent.session(...)` creates a separate effective runtime with its own graph/checkpointer, model fields, copied options, temporary permission rules, active MCP set, cancellation state, and cost tracker.

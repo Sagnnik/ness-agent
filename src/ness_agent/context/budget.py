@@ -52,6 +52,15 @@ class CompactionBridgeEvent(TypedDict, total=False):
 COMPACTION_WARN_RATIO = 0.70
 COMPACTION_SUMMARY_RATIO = 0.80
 COMPACTION_HARD_RATIO = 0.92
+COMPACTION_ACTIVE_TURN_RATIO = 0.40
+COMPACTION_ACTIVE_TURN_MIN_TOKENS = 8_000
+COMPACTION_ACTIVE_TURN_MAX_TOKENS = 65_000
+
+# Fallback allowance per image when provider usage is unavailable for a slice.
+# Actual cost varies by model, resolution, and detail; encoded byte size is not
+# a token count. Keep this separate from the safe display placeholder.
+IMAGE_TOKEN_ALLOWANCE = 4_096
+_IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image"})
 
 
 def content_text(content) -> str:
@@ -59,7 +68,10 @@ def content_text(content) -> str:
         parts: list[str] = []
         for item in content:
             if isinstance(item, dict):
-                parts.append(str(item.get("text", item)))
+                if item.get("type") in _IMAGE_BLOCK_TYPES:
+                    parts.append("[image]")
+                elif "text" in item:
+                    parts.append(str(item["text"]))
             else:
                 parts.append(str(item))
         return " ".join(parts)
@@ -69,7 +81,18 @@ def content_text(content) -> str:
 def estimate_tokens(messages: list[BaseMessage]) -> int:
     text = "\n\n".join(f"{m.type}: {content_text(m.content)}" for m in messages)
     symbols = sum(1 for char in text if not char.isalnum() and not char.isspace())
-    return max(1, len(text) // 3 + symbols // 2 + 6 * len(messages))
+    image_count = sum(
+        1
+        for message in messages
+        if isinstance(message.content, list)
+        for block in message.content
+        if isinstance(block, dict) and block.get("type") in _IMAGE_BLOCK_TYPES
+    )
+    return max(
+        1,
+        len(text) // 3 + symbols // 2 + 6 * len(messages)
+        + image_count * IMAGE_TOKEN_ALLOWANCE,
+    )
 
 
 def resolve_token_count(
@@ -139,7 +162,7 @@ def pressure_note(
     if compacted:
         return (
             "Conversation was summarized at this model boundary. "
-            "The active task was retained verbatim; re-read files if needed."
+            "A coherent recent continuation was retained verbatim; re-read files if needed."
         )
     parts: list[str] = []
     if had_stored_compaction:

@@ -222,13 +222,16 @@ def test_serialize_messages_strips_image_base64(tmp_path: Path):
             {"type": "text", "text": "What is in this picture?"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE="}},
             {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+            {"type": "input_image", "image_url": "data:image/png;base64,INPUT_IMAGE_SECRET"},
         ]
     )
     raw = serialize_messages([msg])
     assert "iVBORw0KGgo" not in raw, "base64 data leaked into serialised prompt"
+    assert "INPUT_IMAGE_SECRET" not in raw, "input_image data leaked into prompt"
     assert "https://example.com/photo.jpg" not in raw, "image URL leaked into serialised prompt"
     assert "[image_url [base64]]" in raw
     assert "[image_url [url]]" in raw
+    assert "[input_image]" in raw
     assert "What is in this picture?" in raw
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from ness_agent.context.budget import (
 from ness_agent.context.overlay import OverlayContext, OverlayProvider
 from ness_cli.events import events_to_messages
 from ness_agent.context.layers import AuxPrompts
+from ness_agent.graph.helpers import _split_active_turn_safely
 from ness_agent.graph.nodes import make_nodes
 from ness_agent.memory import MemoryStore
 from ness_agent.options import MemoryConfig, NessAgentOptions
@@ -635,6 +637,340 @@ def test_compaction_retains_multi_step_active_tool_trajectory(tmp_path: Path):
     durable = messages_from_dict(checkpoint["active_suffix"])
     assert [message.type for message in durable] == ["human", "ai", "tool"]
     assert durable[-1].tool_call_id == "call-1"
+
+
+def test_over_limit_single_active_turn_fails_before_model_invocation(tmp_path: Path):
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-over-limit-active-turn",
+        mode="act",
+        git_available=False,
+    )
+    binding = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="unused")))
+    rt.last_bound_model = binding
+    pressure = ContextPressure(
+        token_count=120_000,
+        context_limit=120_000,
+        ratio=1.0,
+        warning=True,
+        should_compact=True,
+        safety_threshold_reached=True,
+        hard_threshold_reached=True,
+    )
+
+    with (
+        patch("ness_agent.graph.nodes.calculate_context_pressure", return_value=pressure),
+        pytest.raises(RuntimeError, match="active turn is too large to fit safely"),
+    ):
+        asyncio.run(rt.context_gate({
+            "messages": [HumanMessage(content="one indivisible request")],
+            "mode": "act",
+        }))
+
+    binding.ainvoke.assert_not_awaited()
+
+
+def test_compaction_checkpoint_redacts_retained_images(tmp_path: Path):
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-redacted-image-checkpoint",
+        mode="act",
+        git_available=False,
+    )
+    rt.last_bound_model = SimpleNamespace(
+        ainvoke=AsyncMock(return_value=AIMessage(content="summary"))
+    )
+    data_url = "data:image/png;base64,SECRET_IMAGE_DATA"
+    image_result = ToolMessage(
+        content=[
+            {"type": "text", "text": "Read image: screenshot.png"},
+            {
+                "type": "image_url",
+                "image_url": {"url": data_url, "detail": "high"},
+            },
+        ],
+        name="read",
+        tool_call_id="read-image",
+        additional_kwargs={"display_text": "Read image: screenshot.png\n[image]"},
+    )
+    updates = asyncio.run(rt.context_gate({
+        "messages": [
+            HumanMessage(content="completed task"),
+            AIMessage(content="completed answer"),
+            HumanMessage(content="inspect the screenshot"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "read", "args": {}, "id": "read-image"}],
+            ),
+            image_result,
+        ],
+        "force_compact": True,
+        "mode": "act",
+    }))
+
+    checkpoint = agent.config.thread_store.load_thread_events(
+        "session-redacted-image-checkpoint"
+    )[-1]
+    assert "SECRET_IMAGE_DATA" not in json.dumps(checkpoint)
+    durable_suffix = messages_from_dict(checkpoint["active_suffix"])
+    assert durable_suffix[-1].content[-1] == {"type": "text", "text": "[image]"}
+    assert updates["model_context_messages"][-1].content[-1]["image_url"]["url"] == data_url
+
+
+def test_active_turn_split_keeps_parallel_tool_batch_atomic():
+    user = HumanMessage(content="long task")
+    old_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "ping", "args": {}, "id": "old-call"}],
+    )
+    old_result = ToolMessage(
+        content="old result",
+        name="ping",
+        tool_call_id="old-call",
+    )
+    recent_call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "ping", "args": {"n": 1}, "id": "recent-1"},
+            {"name": "ping", "args": {"n": 2}, "id": "recent-2"},
+        ],
+    )
+    recent_results = [
+        ToolMessage(content="one", name="ping", tool_call_id="recent-1"),
+        ToolMessage(content="two", name="ping", tool_call_id="recent-2"),
+    ]
+    recent_batch = [recent_call, *recent_results]
+
+    prefix, suffix = _split_active_turn_safely(
+        [user, old_call, old_result, *recent_batch],
+        keep_recent_tokens=resolve_token_count(
+            recent_batch, known_input_tokens=None
+        ) - 1,
+    )
+
+    assert prefix == [user, old_call, old_result]
+    assert suffix == recent_batch
+    assert isinstance(suffix[0], AIMessage)
+    assert {message.tool_call_id for message in suffix[1:]} == {
+        "recent-1",
+        "recent-2",
+    }
+
+
+@pytest.mark.parametrize("remaining_tokens", [0, 1, 100])
+def test_active_turn_split_excludes_older_batch_over_budget(remaining_tokens):
+    user = HumanMessage(content="long task")
+    batches = [
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ping", "args": {}, "id": call_id}],
+            ),
+            ToolMessage(content="x" * size, tool_call_id=call_id),
+        ]
+        for call_id, size in [("old", 270_000), ("recent", 60_000)]
+    ]
+    budget = resolve_token_count(batches[-1]) + remaining_tokens
+
+    prefix, suffix = _split_active_turn_safely(
+        [user, *batches[0], *batches[1]], keep_recent_tokens=budget
+    )
+
+    assert prefix == [user, *batches[0]]
+    assert suffix == batches[1]
+    assert resolve_token_count(suffix) <= budget
+
+
+@pytest.mark.parametrize("image_results", [False, True], ids=["text", "images"])
+def test_compaction_drops_large_older_batch_within_active_turn(tmp_path, image_results):
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-large-older-batch",
+        mode="act",
+        git_available=False,
+    )
+    binding = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content="summary")))
+    rt.last_bound_model = binding
+    batches = []
+    for call_id, text_size, image_count in [("old", 270_000, 25), ("recent", 60_000, 5)]:
+        content = (
+            [{"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}]
+            * image_count
+            if image_results else "x" * text_size
+        )
+        batches.append([
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ping", "args": {}, "id": call_id}],
+            ),
+            ToolMessage(content=content, tool_call_id=call_id),
+        ])
+    messages = [HumanMessage(content="inspect all results"), *batches[0], *batches[1]]
+
+    # Provider usage triggers compaction even if the local estimate is too low.
+    with patch("ness_agent.graph.nodes._incremental_input_tokens", return_value=110_000):
+        updates = asyncio.run(rt.context_gate({"messages": messages, "mode": "act"}))
+
+    assert updates["compaction_status"]["compacted"] is True
+    assert updates["model_context_messages"][1:] == batches[1]
+    assert updates["compaction_status"]["after_tokens"] < (
+        updates["compaction_status"]["context_limit"]
+        - agent.config.options.compaction_buffer_tokens
+    )
+    binding.ainvoke.assert_awaited_once()
+
+
+def test_active_turn_split_does_not_retain_mismatched_tool_result():
+    user = HumanMessage(content="long task")
+    broken_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "ping", "args": {}, "id": "expected"}],
+    )
+    orphan = ToolMessage(
+        content="wrong result",
+        name="ping",
+        tool_call_id="unexpected",
+    )
+
+    prefix, suffix = _split_active_turn_safely(
+        [user, broken_call, orphan],
+        keep_recent_tokens=1,
+    )
+
+    assert prefix == [user, broken_call, orphan]
+    assert suffix == []
+
+
+def test_single_long_active_turn_compacts_and_repeats_safely(tmp_path: Path):
+    class SummaryBinding:
+        def __init__(self):
+            self.calls = []
+
+        async def ainvoke(self, messages, **_kwargs):
+            self.calls.append(list(messages))
+            return AIMessage(
+                content=f"checkpoint-{len(self.calls)} preserves the original request"
+            )
+
+    agent = _agent(tmp_path)
+    rt = make_nodes(
+        agent.config,
+        thread_id="session-active-turn-compaction",
+        mode="act",
+        git_available=False,
+    )
+    binding = SummaryBinding()
+    rt.last_bound_model = binding
+
+    user = HumanMessage(content="build and fully verify the compiler", id="long-turn")
+    old_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "ping", "args": {"phase": "old"}, "id": "old"}],
+    )
+    old_result = ToolMessage(
+        content="discarded output\n" * 8_000,
+        name="ping",
+        tool_call_id="old",
+    )
+    recent_call = AIMessage(
+        content="checking two results",
+        tool_calls=[
+            {"name": "ping", "args": {"phase": 1}, "id": "recent-1"},
+            {"name": "ping", "args": {"phase": 2}, "id": "recent-2"},
+        ],
+    )
+    large_recent_output = "verified line\n" * 6_000
+    recent_results = [
+        ToolMessage(
+            content=large_recent_output,
+            name="ping",
+            tool_call_id="recent-1",
+        ),
+        ToolMessage(
+            content=large_recent_output,
+            name="ping",
+            tool_call_id="recent-2",
+        ),
+    ]
+    raw_messages = [
+        user,
+        old_call,
+        old_result,
+        recent_call,
+        *recent_results,
+    ]
+
+    first = asyncio.run(rt.context_gate({
+        "messages": raw_messages,
+        "mode": "act",
+    }))
+
+    first_context = first["model_context_messages"]
+    assert first["compaction_status"]["compacted"] is True
+    assert first["compaction_status"]["trigger"] in {"automatic", "safety"}
+    assert first_context[1:] == [recent_call, *recent_results]
+    assert not isinstance(first_context[1], ToolMessage)
+    assert "final 3 transcript message(s)" in binding.calls[0][-1].content
+    assert user in binding.calls[0]
+    assert old_result in binding.calls[0]
+
+    next_call = AIMessage(
+        content="checking the next parallel batch",
+        tool_calls=[
+            {"name": "ping", "args": {"phase": 3}, "id": "next-1"},
+            {"name": "ping", "args": {"phase": 4}, "id": "next-2"},
+        ],
+    )
+    next_results = [
+        ToolMessage(
+            content=large_recent_output,
+            name="ping",
+            tool_call_id="next-1",
+        ),
+        ToolMessage(
+            content=large_recent_output,
+            name="ping",
+            tool_call_id="next-2",
+        ),
+    ]
+    second_raw = [*raw_messages, next_call, *next_results]
+    second = asyncio.run(rt.context_gate({
+        "messages": second_raw,
+        "model_context_messages": first_context,
+        "model_context_source_count": first["model_context_source_count"],
+        "model_system_message": first["model_system_message"],
+        "last_input_tokens": first["last_input_tokens"],
+        "force_compact": True,
+        "mode": "act",
+    }))
+
+    second_context = second["model_context_messages"]
+    assert second["compaction_status"]["compacted"] is True
+    assert second_context[1:] == [next_call, *next_results]
+    assert any(
+        "checkpoint-1 preserves the original request" in str(message.content)
+        for message in binding.calls[1]
+    )
+
+    checkpoints = [
+        event
+        for event in agent.config.thread_store.load_thread_events(
+            "session-active-turn-compaction"
+        )
+        if event.get("kind") == "compaction_llm"
+    ]
+    assert len(checkpoints) == 2
+    replayed = events_to_messages(
+        agent.config.thread_store.load_thread_events(
+            "session-active-turn-compaction"
+        )
+    )
+    assert [message.type for message in replayed] == ["human", "ai", "tool", "tool"]
+    assert "checkpoint-2 preserves the original request" in replayed[0].content
+    assert replayed[1:] == [next_call, *next_results]
 
 
 def test_summary_failure_is_suppressed_for_same_active_turn(tmp_path: Path):

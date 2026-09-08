@@ -25,6 +25,7 @@ from ness_cli.provider.codex.transport import (
 from ness_cli.provider.openrouter.adapter import OpenRouterProviderAdapter
 from ness_cli.provider.profile import provider_profile, update_provider_profile
 from ness_agent.tracing.cost import CostTracker
+from evals.codex.codex_chat_model import CodexChatModel
 
 
 def _jwt(expiry: int) -> str:
@@ -104,6 +105,62 @@ def test_codex_chat_model_preserves_function_call_history():
         "arguments": '{"path":"a.py"}',
     }
     assert items[2]["type"] == "function_call_output"
+    assert items[2]["output"] == "contents"
+
+
+def test_codex_chat_model_projects_image_tool_results():
+    model = CodexSubscriptionChatModel(model="gpt-test")
+    data_url = "data:image/png;base64,cG5n"
+
+    _instructions, items = model._input(
+        [
+            ToolMessage(
+                content=[
+                    {"type": "text", "text": "Read image: code.png, 2x1"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url, "detail": "high"},
+                    },
+                ],
+                tool_call_id="call-image",
+            )
+        ]
+    )
+
+    assert items == [
+        {
+            "type": "function_call_output",
+            "call_id": "call-image",
+            "output": [
+                {"type": "input_text", "text": "Read image: code.png, 2x1"},
+                {"type": "input_image", "image_url": data_url, "detail": "high"},
+            ],
+        }
+    ]
+
+
+def test_codex_eval_chat_model_projects_image_tool_results():
+    model = CodexChatModel(model="gpt-test")
+    data_url = "data:image/png;base64,cG5n"
+    _instructions, items = model._input(
+        [
+            ToolMessage(
+                content=[
+                    {"type": "text", "text": "Read image: code.png, 2x1"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url, "detail": "high"},
+                    },
+                ],
+                tool_call_id="call-image",
+            )
+        ]
+    )
+
+    assert items[0]["output"] == [
+        {"type": "input_text", "text": "Read image: code.png, 2x1"},
+        {"type": "input_image", "image_url": data_url, "detail": "high"},
+    ]
 
 
 def test_codex_prompt_cache_key_is_stable_and_thread_scoped():

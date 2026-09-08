@@ -299,6 +299,7 @@ async def _main(*, resume_thread_id: str | None = None, yolo: bool = False) -> N
             project_root=coding.project_root,
             agent_config=coding.cfg,
             all_skills=coding.skill_loader.load() if coding.skill_loader else None,
+            vision=settings.supports_vision,
         )
     )
 
