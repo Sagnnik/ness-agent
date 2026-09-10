@@ -39,28 +39,31 @@ class DeleteFileTests(SessionContextTestMixin, unittest.TestCase):
         self.uninstall_ctx()
         self._tmp.cleanup()
 
-    def test_deletes_existing_file(self) -> None:
-        target = self.root / "old_module.py"
-        target.write_text("x = 1\n", encoding="utf-8")
-        result = delete.invoke({"path": "old_module.py"})
-        self.assertEqual(result, "Deleted old_module.py")
-        self.assertFalse(target.exists())
+    def test_deletes_files_in_one_call(self) -> None:
+        targets = [self.root / "old_module.py", self.root / "old_image.png"]
+        for target in targets:
+            target.write_bytes(b"old")
+
+        result = delete.invoke({"paths": ["old_module.py", "old_image.png"]})
+
+        self.assertEqual(result, "Deleted old_module.py\nDeleted old_image.png")
+        self.assertTrue(all(not target.exists() for target in targets))
 
     def test_refuses_directory(self) -> None:
         (self.root / "pkg").mkdir()
-        result = delete.invoke({"path": "pkg"})
+        result = delete.invoke({"paths": ["pkg"]})
         self.assertIn("directory", result)
         self.assertTrue((self.root / "pkg").is_dir())
 
     def test_refuses_missing_file(self) -> None:
-        result = delete.invoke({"path": "missing.txt"})
+        result = delete.invoke({"paths": ["missing.txt"]})
         self.assertIn("does not exist", result)
 
     def test_refuses_git_paths(self) -> None:
         git_file = self.root / ".git" / "config"
         git_file.parent.mkdir(parents=True)
         git_file.write_text("[core]\n", encoding="utf-8")
-        result = delete.invoke({"path": ".git/config"})
+        result = delete.invoke({"paths": [".git/config"]})
         self.assertIn("protected", result)
         self.assertTrue(git_file.exists())
 
@@ -76,7 +79,7 @@ class DeleteFileTests(SessionContextTestMixin, unittest.TestCase):
             path = ness / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            result = delete.invoke({"path": f".ness/{rel}"})
+            result = delete.invoke({"paths": [f".ness/{rel}"]})
             with self.subTest(path=rel):
                 self.assertIn("protected", result)
                 self.assertTrue(path.exists())
@@ -86,12 +89,27 @@ class DeleteFileTests(SessionContextTestMixin, unittest.TestCase):
         outside = outside_parent / "outside_delete_test.txt"
         outside.write_text("nope", encoding="utf-8")
         try:
-            result = delete.invoke({"path": str(outside)})
+            result = delete.invoke({"paths": [str(outside)]})
             self.assertTrue(result.startswith("Error:"))
             self.assertTrue(outside.exists())
         finally:
             outside.unlink(missing_ok=True)
             outside_parent.rmdir()
+
+    def test_validation_failure_deletes_nothing(self) -> None:
+        target = self.root / "keep.txt"
+        target.write_text("keep\n", encoding="utf-8")
+
+        result = delete.invoke({"paths": ["keep.txt", "missing.txt"]})
+
+        self.assertTrue(result.startswith("Error: no files deleted:"))
+        self.assertTrue(target.exists())
+
+    def test_requires_paths_list(self) -> None:
+        schema = _tool_json_schema(delete)
+        self.assertEqual(schema["required"], ["paths"])
+        self.assertEqual(schema["properties"]["paths"]["type"], "array")
+        self.assertNotIn("path", schema["properties"])
 
 
 class ReadFileTests(SessionContextTestMixin, unittest.TestCase):

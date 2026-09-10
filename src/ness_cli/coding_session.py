@@ -805,7 +805,10 @@ def _extract_mutated_paths(name: str, args: dict) -> list[str]:
     if not args:
         return []
     n = (name or "").lower()
-    if n in ("edit", "write", "delete", "auto_format"):
+    if n == "delete":
+        paths = args.get("paths")
+        return [str(path) for path in paths] if isinstance(paths, list) else []
+    if n in ("edit", "write", "auto_format"):
         p = args.get("path")
         return [str(p)] if p else []
     if n == "shell":

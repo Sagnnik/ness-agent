@@ -342,6 +342,22 @@ def test_record_turn_mutations_records_paths(coding):
     assert "src/app.py" in paths
 
 
+def test_record_turn_mutations_records_every_deleted_path(coding):
+    _seed_tool_turn(
+        coding,
+        1,
+        [_tool_event("delete", {"paths": ["one.png", "two.png"]})],
+    )
+
+    coding._record_turn_mutations(1)
+
+    cp = coding.thread_store.get_checkpoint(coding.thread_id, 1)
+    assert cp is not None
+    paths = cp.get("modified_paths") or "[]"
+    assert "one.png" in paths
+    assert "two.png" in paths
+
+
 def test_record_turn_mutations_shell_is_full_tree_sentinel(coding):
     _seed_tool_turn(coding, 1, [_tool_event("shell", {"command": "rm -rf build/"})])
 

@@ -146,22 +146,45 @@ def _reject_protected_write(rel_path: str, action: str) -> str | None:
 
 
 @tool
-def delete(path: str) -> str:
-    """Delete a file from the filesystem."""
-    try:
-        abs_path = _validate_path(path)
-        rel = _relative_to_root(abs_path)
-        if error := _reject_protected_write(rel, "delete"):
-            return error
-        p = Path(abs_path)
-        if not p.exists():
-            return f"Error: {rel} does not exist"
-        if p.is_dir():
-            return f"Error: {rel} is a directory; delete only removes files"
-        p.unlink()
-        return f"Deleted {rel}"
-    except Exception as exc:
-        return f"Error: {exc}"
+def delete(paths: list[str]) -> str:
+    """Delete one or more files from the filesystem in a single call."""
+    if not paths:
+        return "Error: paths must contain at least one file"
+    if len(paths) != len(set(paths)):
+        return "Error: paths must not contain duplicates"
+
+    targets: list[tuple[Path, str]] = []
+    errors: list[str] = []
+    for path in paths:
+        try:
+            abs_path = _validate_path(path)
+            rel = _relative_to_root(abs_path)
+            if error := _reject_protected_write(rel, "delete"):
+                errors.append(error.removeprefix("Error: "))
+                continue
+            target = Path(abs_path)
+            if not target.exists():
+                errors.append(f"{rel} does not exist")
+                continue
+            if target.is_dir():
+                errors.append(f"{rel} is a directory; delete only removes files")
+                continue
+            targets.append((target, rel))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if errors:
+        details = "\n".join(f"- {error}" for error in errors)
+        return f"Error: no files deleted:\n{details}"
+
+    results: list[str] = []
+    for target, rel in targets:
+        try:
+            target.unlink()
+            results.append(f"Deleted {rel}")
+        except Exception as exc:
+            results.append(f"Error: could not delete {rel}: {exc}")
+    return "\n".join(results)
 
 
 @tool

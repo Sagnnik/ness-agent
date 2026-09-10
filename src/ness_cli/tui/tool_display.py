@@ -143,6 +143,15 @@ def _path_token(args: dict[str, Any]) -> str:
     return _short_path(str(args.get("path", "")))
 
 
+def _paths_token(args: dict[str, Any]) -> str:
+    paths = args.get("paths")
+    if not isinstance(paths, list) or not paths:
+        return ""
+    if len(paths) == 1:
+        return _short_path(str(paths[0]))
+    return f"{len(paths)} files"
+
+
 def _edit_token(args: dict[str, Any]) -> str:
     path = _short_path(str(args.get("path", "")))
     return _join_parts(path, "1 edit")
@@ -335,7 +344,7 @@ def format_tool_args(name: str, args: Any) -> str:
     if name == "edit":
         return _edit_token(args)
     if name == "delete":
-        return _path_token(args)
+        return _paths_token(args)
     if name == "web_search":
         return _web_search_token(args)
     if name == "fetch_url":

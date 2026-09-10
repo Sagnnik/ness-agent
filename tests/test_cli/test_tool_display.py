@@ -32,6 +32,11 @@ def test_format_tool_args_defaults_missing_shell_action_to_run() -> None:
     assert "git status --short" in token
 
 
+def test_format_tool_args_summarizes_bulk_delete() -> None:
+    token = format_tool_args("delete", {"paths": ["one.png", "two.png"]})
+    assert token == "2 files"
+
+
 def test_format_subagent_output_single_ok() -> None:
     header, body = format_subagent_output("Found routes in src/api.py")
     assert header == "subagent ok"
