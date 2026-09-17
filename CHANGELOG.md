@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the `delete` tool now requires a `paths` list and deletes the listed files in one call. It no longer accepts the singular `path` argument.
+
 ## [0.2.4] - 2026-09-08 — Released
 
 ### Added
