@@ -1,0 +1,461 @@
+Hit:1 http://deb.debian.org/debian bookworm InRelease
+Hit:2 http://deb.debian.org/debian bookworm-updates InRelease
+Hit:3 http://deb.debian.org/debian-security bookworm-security InRelease
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+curl is already the newest version (7.88.1-10+deb12u15).
+0 upgraded, 0 newly installed, 0 to remove and 32 not upgraded.
+downloading uv 0.9.5 x86_64-unknown-linux-gnu
+no checksums to verify
+installing to /root/.local/bin
+  uv
+  uvx
+everything's installed!
+Downloading pygments (1.2MiB)
+ Downloading pygments
+Installed 6 packages in 118ms
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.4.1, pluggy-1.6.0
+rootdir: /tests
+plugins: json-ctrf-0.3.5
+collected 1 item
+
+../tests/test_outputs.py F                                               [100%]
+
+=================================== FAILURES ===================================
+_________________________________ test_interp __________________________________
+
+    def test_interp():
+        """
+        Test the interpreter works correctly
+        """
+        print("Scheme Interpreter Verification")
+        print("=" * 50)
+        print("Running tests through both interp.py and eval.scm\n")
+    
+        # Create temp directory for test outputs
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_dir = os.getcwd()
+    
+            test_files = find_test_files()
+            if not test_files:
+                print("No test files found!")
+                return 1
+    
+            passed = 0
+            failed = 0
+    
+            for test_file in test_files:
+                print(f"\nTesting: {test_file}")
+                print("-" * 40)
+    
+                # Detect if input is needed
+                test_input = detect_input_requirements(test_file)
+    
+                # Create isolated directories for each run
+                direct_dir = os.path.join(temp_dir, "direct")
+                eval_dir = os.path.join(temp_dir, "eval")
+    
+                os.makedirs(direct_dir, exist_ok=True)
+                os.makedirs(eval_dir, exist_ok=True)
+    
+                # Copy necessary files
+                for f in ["interp.py", "eval.scm", test_file]:
+                    if os.path.exists(f):
+                        shutil.copy2(f, direct_dir)
+                        shutil.copy2(f, eval_dir)
+    
+                # Run direct
+                os.chdir(direct_dir)
+                direct_out, direct_err, direct_code = run_scheme_direct(
+                    os.path.basename(test_file), test_input
+                )
+    
+                # Run through eval.scm
+                os.chdir(eval_dir)
+                eval_out, eval_err, eval_code = run_scheme_through_eval(
+                    os.path.basename(test_file), test_input
+                )
+    
+                if (
+                    "05-simple" in test_file
+                    or "calculator.scm" in test_file
+                    or "closures.scm" in test_file
+                ):
+                    # Run through eval.scm meta
+                    os.chdir(eval_dir)
+                    eval2_out, _, _ = run_scheme_through_eval(
+                        os.path.basename(test_file), test_input, metacirc=True
+                    )
+                else:
+                    eval2_out = eval_out
+    
+                os.chdir(original_dir)
+    
+                # Check for errors
+                if direct_err and direct_err != "TIMEOUT":
+                    print(f"Direct error: {direct_err}")
+                if eval_err and eval_err != "TIMEOUT":
+                    print(f"Eval.scm error: {eval_err}")
+    
+                # Compare outputs
+                if direct_err == "TIMEOUT" or eval_err == "TIMEOUT":
+                    print("FAILED: Timeout")
+                    failed += 1
+                elif direct_code != 0 and direct_code != -1:
+                    print(f"FAILED: Direct execution failed with code {direct_code}")
+                    failed += 1
+                else:
+                    match, message = compare_outputs(direct_out, eval_out, test_file)
+                    match2, message2 = compare_outputs(direct_out, eval2_out, test_file)
+                    match = match and match2
+    
+                    if match:
+                        print(f"PASSED: {message}")
+                        passed += 1
+                    else:
+                        print(f"FAILED: {message}")
+                        failed += 1
+    
+                # Clean up temp directories
+                shutil.rmtree(direct_dir, ignore_errors=True)
+                shutil.rmtree(eval_dir, ignore_errors=True)
+    
+        print("\n" + "=" * 50)
+        print(f"Summary: {passed} passed, {failed} failed out of {passed + failed} tests")
+    
+>       assert failed == 0
+E       assert 2 == 0
+
+/tests/test_outputs.py:220: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Scheme Interpreter Verification
+==================================================
+Running tests through both interp.py and eval.scm
+
+
+Testing: /tests/shadow_test/01-factorial.scm
+----------------------------------------
+takes 0.7427010536193848
+PASSED: OK
+
+Testing: /tests/shadow_test/02-fibonacci.scm
+----------------------------------------
+takes 23.653904676437378
+PASSED: OK
+
+Testing: /tests/shadow_test/03-list-operations.scm
+----------------------------------------
+takes 0.7970192432403564
+PASSED: OK
+
+Testing: /tests/shadow_test/04-higher-order.scm
+----------------------------------------
+takes 0.4005250930786133
+PASSED: OK
+
+Testing: /tests/shadow_test/05-simple-io.scm
+----------------------------------------
+takes 0.13214373588562012
+takes 39.56429934501648
+PASSED: OK
+
+Testing: /tests/shadow_test/06-interactive-io.scm
+----------------------------------------
+takes 0.42287302017211914
+PASSED: OK
+
+Testing: /tests/shadow_test/08-progn-sequencing.scm
+----------------------------------------
+takes 0.237412691116333
+PASSED: OK
+
+Testing: /tests/shadow_test/09-mutual-recursion.scm
+----------------------------------------
+takes 2.0079703330993652
+PASSED: OK
+
+Testing: /tests/shadow_test/10-advanced-features.scm
+----------------------------------------
+takes 1.6168968677520752
+PASSED: OK
+
+Testing: /tests/shadow_test/accumulator_patterns.scm
+----------------------------------------
+takes 1.0431292057037354
+PASSED: OK
+
+Testing: /tests/shadow_test/binary_tree.scm
+----------------------------------------
+takes 1.1842103004455566
+PASSED: OK
+
+Testing: /tests/shadow_test/church_numerals.scm
+----------------------------------------
+takes 0.5891857147216797
+PASSED: OK
+
+Testing: /tests/shadow_test/closures.scm
+----------------------------------------
+takes 0.15102553367614746
+FAILED: OK
+
+Testing: /tests/shadow_test/continuation_passing.scm
+----------------------------------------
+takes 2.8121397495269775
+PASSED: OK
+
+Testing: /tests/shadow_test/currying.scm
+----------------------------------------
+takes 0.2119603157043457
+PASSED: OK
+
+Testing: /tests/shadow_test/filter_operations.scm
+----------------------------------------
+takes 1.7854952812194824
+PASSED: OK
+
+Testing: /tests/shadow_test/fold_operations.scm
+----------------------------------------
+takes 0.43149781227111816
+PASSED: OK
+
+Testing: /tests/shadow_test/function_composition.scm
+----------------------------------------
+takes 0.23222756385803223
+PASSED: OK
+
+Testing: /tests/shadow_test/lazy_evaluation.scm
+----------------------------------------
+takes 2.9043517112731934
+PASSED: OK
+
+Testing: /tests/shadow_test/list_operations.scm
+----------------------------------------
+takes 2.3573763370513916
+PASSED: OK
+
+Testing: /tests/shadow_test/map_operations.scm
+----------------------------------------
+takes 1.2505321502685547
+PASSED: OK
+
+Testing: /tests/shadow_test/memoization.scm
+----------------------------------------
+takes 0.9423520565032959
+PASSED: OK
+
+Testing: /tests/shadow_test/mutual_recursion.scm
+----------------------------------------
+takes 30.875549793243408
+PASSED: OK
+
+Testing: /tests/shadow_test/nested_defines.scm
+----------------------------------------
+takes 0.3296213150024414
+PASSED: OK
+
+Testing: /tests/shadow_test/oeis_sequences.scm
+----------------------------------------
+takes 49.092041969299316
+PASSED: OK
+
+Testing: /tests/shadow_test/oeis_sequences2.scm
+----------------------------------------
+takes 8.182698488235474
+PASSED: OK
+
+Testing: /tests/shadow_test/oeis_sequences3.scm
+----------------------------------------
+takes 29.66144609451294
+PASSED: OK
+
+Testing: /tests/shadow_test/recursive_structures.scm
+----------------------------------------
+takes 2.0252130031585693
+PASSED: OK
+
+Testing: /tests/shadow_test/test_read.scm
+----------------------------------------
+takes 0.05196666717529297
+PASSED: OK
+
+Testing: /tests/shadow_test/variadic_functions.scm
+----------------------------------------
+takes 1.690654993057251
+PASSED: OK
+
+Testing: /tests/shadow_test/y_combinator.scm
+----------------------------------------
+takes 9.245184659957886
+PASSED: OK
+
+Testing: /tests/test/01-factorial.scm
+----------------------------------------
+takes 0.9394609928131104
+PASSED: OK
+
+Testing: /tests/test/02-fibonacci.scm
+----------------------------------------
+takes 8.022457361221313
+PASSED: OK
+
+Testing: /tests/test/03-list-operations.scm
+----------------------------------------
+takes 0.7640130519866943
+PASSED: OK
+
+Testing: /tests/test/04-higher-order.scm
+----------------------------------------
+takes 0.2633373737335205
+PASSED: OK
+
+Testing: /tests/test/05-simple-io.scm
+----------------------------------------
+takes 0.44947266578674316
+takes 36.136961460113525
+PASSED: OK
+
+Testing: /tests/test/06-interactive-io.scm
+----------------------------------------
+takes 0.08185601234436035
+PASSED: OK
+
+Testing: /tests/test/08-progn-sequencing.scm
+----------------------------------------
+takes 0.197157621383667
+PASSED: OK
+
+Testing: /tests/test/09-mutual-recursion.scm
+----------------------------------------
+takes 2.5529885292053223
+PASSED: OK
+
+Testing: /tests/test/10-advanced-features.scm
+----------------------------------------
+takes 0.311678409576416
+PASSED: OK
+
+Testing: /tests/test/accumulator_patterns.scm
+----------------------------------------
+takes 0.8845949172973633
+PASSED: OK
+
+Testing: /tests/test/binary_tree.scm
+----------------------------------------
+takes 1.5336577892303467
+PASSED: OK
+
+Testing: /tests/test/calculator.scm
+----------------------------------------
+takes 0.08698105812072754
+takes 25.880932569503784
+PASSED: OK
+
+Testing: /tests/test/church_numerals.scm
+----------------------------------------
+takes 0.2389814853668213
+PASSED: OK
+
+Testing: /tests/test/closures.scm
+----------------------------------------
+takes 0.13893747329711914
+FAILED: OK
+
+Testing: /tests/test/continuation_passing.scm
+----------------------------------------
+takes 1.5290896892547607
+PASSED: OK
+
+Testing: /tests/test/currying.scm
+----------------------------------------
+takes 0.33422374725341797
+PASSED: OK
+
+Testing: /tests/test/filter_operations.scm
+----------------------------------------
+takes 1.5110092163085938
+PASSED: OK
+
+Testing: /tests/test/fold_operations.scm
+----------------------------------------
+takes 0.3727302551269531
+PASSED: OK
+
+Testing: /tests/test/function_composition.scm
+----------------------------------------
+takes 0.5512640476226807
+PASSED: OK
+
+Testing: /tests/test/lazy_evaluation.scm
+----------------------------------------
+takes 2.199448585510254
+PASSED: OK
+
+Testing: /tests/test/list_operations.scm
+----------------------------------------
+takes 2.026840925216675
+PASSED: OK
+
+Testing: /tests/test/map_operations.scm
+----------------------------------------
+takes 0.9821627140045166
+PASSED: OK
+
+Testing: /tests/test/memoization.scm
+----------------------------------------
+takes 1.9118995666503906
+PASSED: OK
+
+Testing: /tests/test/mutual_recursion.scm
+----------------------------------------
+takes 15.61480188369751
+PASSED: OK
+
+Testing: /tests/test/nested_defines.scm
+----------------------------------------
+takes 0.2712056636810303
+PASSED: OK
+
+Testing: /tests/test/oeis_sequences.scm
+----------------------------------------
+takes 34.94896745681763
+PASSED: OK
+
+Testing: /tests/test/oeis_sequences2.scm
+----------------------------------------
+takes 13.037358283996582
+PASSED: OK
+
+Testing: /tests/test/oeis_sequences3.scm
+----------------------------------------
+takes 26.055667877197266
+PASSED: OK
+
+Testing: /tests/test/recursive_structures.scm
+----------------------------------------
+takes 2.193849563598633
+PASSED: OK
+
+Testing: /tests/test/test_read.scm
+----------------------------------------
+takes 0.0481104850769043
+PASSED: OK
+
+Testing: /tests/test/variadic_functions.scm
+----------------------------------------
+takes 1.816748857498169
+PASSED: OK
+
+Testing: /tests/test/y_combinator.scm
+----------------------------------------
+takes 3.218217611312866
+PASSED: OK
+
+==================================================
+Summary: 61 passed, 2 failed out of 63 tests
+=========================== short test summary info ============================
+FAILED ../tests/test_outputs.py::test_interp - assert 2 == 0
+======================== 1 failed in 528.83s (0:08:48) =========================

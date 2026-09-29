@@ -1,0 +1,31 @@
+Implemented `/app/convert_masks.py`.
+
+Key behavior:
+- Loads MobileSAM’s distilled `vit_t` model via `sam_model_registry` (`convert_masks.py:223`).
+- Loads weights with `map_location="cpu"` and supports CPU execution.
+- Uses each annotation’s bounding box and interior point as MobileSAM prompts (`convert_masks.py:282-295`).
+- Selects the prediction best aligned with the original mask.
+- Removes overlaps and keeps one connected component per cell (`convert_masks.py:297-314`).
+- Converts each final mask to a closed polygon contour and updates only:
+  - `xmin`
+  - `xmax`
+  - `ymin`
+  - `ymax`
+  - `coords_x`
+  - `coords_y`
+- Preserves the remaining CSV columns and row order.
+
+Example invocation:
+
+```bash
+python /app/convert_masks.py \
+  --weights_path /path/to/mobile_sam.pt \
+  --output_path /path/to/refined_masks.csv \
+  --rgb_path /app/demo_rgb.png \
+  --csv_path /app/demo_metadata.csv
+```
+
+Verification:
+- Python compilation passed.
+- Demo CSV parsing passed: 48 rows, including 19 rectangles and 29 existing polylines.
+- End-to-end execution could not be run in this container because `cv2`, `numpy`, `torch`, and `mobile_sam` are unavailable here.

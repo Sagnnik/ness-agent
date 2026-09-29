@@ -1,0 +1,31 @@
+Added a complete Git-push deployment setup:
+
+- `setup-git-web.sh:1` — creates `/git/server`, installs the receive hook, and enables an HTTP service on port `8080`.
+- `deploy-hook.sh:1` — publishes pushed `master` commits into versioned releases and atomically switches the live release.
+- `README.md:1` — installation and client usage instructions.
+
+Run this on the actual server as root, replacing `user` with the existing SSH account:
+
+```sh
+sudo ./setup-git-web.sh user
+```
+
+Then the client workflow is:
+
+```sh
+git clone user@server:/git/server
+cd server
+echo "hello world" > hello.html
+git add hello.html
+git commit -m "add hello.html"
+git push origin master
+curl http://server:8080/hello.html
+```
+
+The setup does not modify SSH/login configuration. Open TCP port `8080` in the server firewall if necessary.
+
+Verification completed:
+
+- Both shell scripts pass `sh -n`.
+- Setup preflight correctly detects missing Git.
+- The live Git push/curl integration test could not run in this container because Git, Python 3, systemd, and `sshd` are not installed.

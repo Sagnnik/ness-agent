@@ -1,0 +1,16 @@
+Implemented `/app/pipeline_parallel.py`.
+
+Key behavior:
+- Splits LLaMA decoder layers across ranks using balanced contiguous ranges.
+- Rank 0 performs token embedding; last rank performs final norm and LM head.
+- Runs all microbatch forwards before any backward passes.
+- Uses distributed activation/gradient transfers between pipeline stages.
+- Detaches tensors at stage boundaries and explicitly reconnects autograd during backward.
+- Computes per-microbatch cross-entropy scaled by the number of microbatches.
+- Supports modern and older Hugging Face LLaMA attention-mask/rotary APIs.
+- Does not use hooks.
+
+Validation:
+- Confirmed the requested distributed operations and training function are present.
+- Confirmed no hook registration or optimizer stepping was added.
+- Runtime tests could not be executed because the container has no Python interpreter, test suite, or Git executable.

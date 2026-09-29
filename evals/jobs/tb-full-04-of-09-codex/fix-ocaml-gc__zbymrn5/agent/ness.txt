@@ -1,0 +1,15 @@
+Implemented the GC sweep fix in `runtime/shared_heap.c:650`.
+
+- Corrected the sweep pointer increment from `Whsize_hd(hd)` to the size-class stride `wh`.
+- This preserves alignment after traversing compressed free runs and prevents invalid header reads.
+- Reproduced the original bootstrap segmentation fault during `make coldstart`.
+- Verified successfully:
+  - `make coldstart -j2`
+  - `make coreall -j2`
+  - `make opt -j2`
+  - `make ocamlc.opt -j2`
+  - `make ocamlopt.opt -j2`
+  - `make -C testsuite one DIR=tests/basic`
+  - `OCAMLRUNPARAM=V=1 make -C testsuite one DIR=tests/basic`
+
+The basic testsuite passes **40/40 tests**, including with heap verification enabled.
