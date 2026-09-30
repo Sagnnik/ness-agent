@@ -1,0 +1,36 @@
+Implemented `vm.js`.
+
+What it includes:
+- ELF32 little-endian MIPS loader for `/app/doomgeneric_mips`
+- Sparse memory supporting the binary’s 1 GiB static heap
+- MIPS32r2 instruction execution with branch delay slots
+- Unaligned `lwl/lwr/swl/swr` memory operations
+- COP1 floating-point instructions used by Doom
+- Host-backed syscalls for file I/O, seeking, timestamps, directory creation, rename, unlink, and exit
+- Reads `doom.wad` from the repository
+- Preserves `/tmp/frame.bmp`
+- Copies completed frames to `frames/frame-000001.bmp`
+- Stops after the first completed frame by default; use `VM_MAX_FRAMES` to render more
+
+Verified with:
+
+```text
+node vm.js
+```
+
+Result:
+
+```text
+executed 30670795 instructions; frames saved: 1
+```
+
+The generated BMP was validated as:
+
+- Signature: `BM`
+- Dimensions: `640 × 400`
+- Pixel format: 32-bit
+- Top-down height: `-400`
+- File size: `1,024,054` bytes
+- First frame visually renders the Doom title screen
+
+Key implementation areas are in `vm.js:42`, `vm.js:200`, `vm.js:377`, `vm.js:547`, and `vm.js:777`.

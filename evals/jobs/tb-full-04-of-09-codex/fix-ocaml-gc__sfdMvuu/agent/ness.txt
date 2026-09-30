@@ -1,0 +1,9 @@
+Fixed `runtime/shared_heap.c:650`.
+
+The sweep loop was advancing by `Whsize_hd(hd)`, the live object’s actual size, instead of `wh`, the fixed size-class slot width. This caused the scanner to enter padding or fields after run-length-compressed free blocks and corrupt the heap. The loop now advances by `wh`.
+
+Verified:
+
+- `make -j2 world` — successful bootstrap
+- `make -j2 opt.opt` — optimized compilers built
+- `make -C testsuite one DIR=tests/basic` — **40 passed, 0 failed**

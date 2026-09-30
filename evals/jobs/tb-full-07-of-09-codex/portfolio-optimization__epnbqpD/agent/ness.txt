@@ -1,0 +1,24 @@
+Implemented the optimized portfolio calculations.
+
+Changes:
+- `portfolio_optimized.c`
+  - Implemented `sqrt(x^T * S * x)` using native C loops.
+  - Implemented `x^T * r`.
+  - Added dimension validation.
+  - Uses direct NumPy `float64` array access.
+  - Releases the GIL during calculations.
+  - Preserves the baseline accumulation order for numerical consistency.
+- `portfolio_optimized.py`
+  - Converts inputs to contiguous NumPy `float64` arrays.
+  - Calls the compiled C extension.
+
+Verification:
+- Built successfully with:
+  ```bash
+  python3 setup.py build_ext --inplace
+  ```
+- Correctness differences were below `1e-10`.
+- Benchmark results:
+  - 5000 assets: `1.6x` speedup
+  - 8000 assets: `1.7x` speedup
+- Full benchmark reported `ALL TESTS PASSED!`

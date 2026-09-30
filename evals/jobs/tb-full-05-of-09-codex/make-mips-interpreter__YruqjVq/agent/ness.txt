@@ -1,0 +1,32 @@
+Implemented `vm.js` with:
+
+- ELF32 little-endian MIPS32r2 loading
+- Sparse virtual memory for the large ELF heap/BSS
+- MIPS integer instruction execution, delayed branches, HI/LO arithmetic, unaligned accesses, and required SPECIAL3 instructions
+- Required hard-float COP1 operations
+- Host-backed system calls for file I/O, timing, directories, rename/unlink, and exit
+- Doom WAD/config/save-file access through the host filesystem
+- Frame preservation:
+  - `/tmp/frame.bmp`
+  - `frames/frame_000000.bmp`, etc.
+
+Running:
+
+```bash
+node vm.js
+```
+
+boots Doom, loads `doom.wad`, initializes the renderer, and saves the first frame before exiting. Continuous execution is available with:
+
+```bash
+VM_MAX_FRAMES=0 node vm.js
+```
+
+Verification:
+
+- Doom boot completed successfully.
+- First frame rendered after `30,670,799` MIPS instructions.
+- Frame validated as a 640×400, 32-bit BMP.
+- File size: `1,024,054` bytes.
+- `frames/frame_000000.bmp` matches `/tmp/frame.bmp`.
+- SHA-256: `74a38d56be430cf3707bb3458444f1cfd794a8ad2d68fcedd3b152a78beba07c`.

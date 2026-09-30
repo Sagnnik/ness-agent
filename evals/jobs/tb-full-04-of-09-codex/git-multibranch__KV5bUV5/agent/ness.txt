@@ -1,0 +1,26 @@
+Configured the Git/SSH deployment server:
+
+- Git user `git` with password authentication enabled and `git-shell` as its login shell.
+- Bare repository at `/git/project`.
+- SSH configuration: `/etc/ssh/sshd_config.d/git-server.conf:1-7`
+- Branch-aware `post-receive` hook: `/git/project/hooks/post-receive:1-29`
+  - `main` deploys to `/var/www/git-project/main/current`
+  - `dev` deploys to `/var/www/git-project/dev/current`
+  - Deployments use atomic symlink switches.
+- Nginx HTTPS configuration on port `8443`: `/etc/nginx/sites-available/default:1-21`
+- Self-signed certificate:
+  - `/etc/ssl/certs/nginx-selfsigned.crt`
+  - `/etc/ssl/private/nginx-selfsigned.key`
+
+Verified:
+
+- Cloning over SSH using password authentication succeeds.
+- Main push deployed `main branch content`.
+- Dev push deployed `dev branch content`.
+- HTTPS responses match exactly:
+  - `https://localhost:8443/index.html`
+  - `https://localhost:8443/dev/index.html`
+- The certificate is self-signed (`subject=issuer=CN=localhost`).
+- Push-to-deployment timings were approximately 280 ms, within the 3-second requirement.
+- SSH and Nginx configuration tests pass, and both daemons are running.
+- Temporary validation branch refs were removed afterward so the repository is ready for the test’s fresh `main` and `dev` pushes.

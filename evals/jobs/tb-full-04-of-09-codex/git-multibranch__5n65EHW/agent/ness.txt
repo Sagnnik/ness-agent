@@ -1,0 +1,24 @@
+Configured the Git/HTTPS deployment server:
+
+- Bare repository: `/git/project`
+- SSH account: `git@localhost`, password authentication enabled
+- Git shell restricted to Git commands
+- SSH listening on port 22
+- Nginx HTTPS listening on port 8443
+- Self-signed certificate for `localhost`
+- Deployment hook: `/git/project/hooks/post-receive:30`
+  - `main` deploys to `/var/www/main`
+  - `dev` deploys to `/var/www/dev`
+- Nginx routing:
+  - `/etc/nginx/sites-available/default:8` serves the main branch
+  - `/etc/nginx/sites-available/default:15` serves the dev branch
+- Password authentication configuration: `/etc/ssh/sshd_config.d/99-git-password.conf:1`
+
+Verified with an actual password-authenticated clone and pushes:
+
+- Main endpoint returned `main branch content`
+- Dev endpoint returned `dev branch content`
+- Main deployment completed in 294 ms
+- Dev deployment completed in 236 ms
+- `sshd -t` and `nginx -t` passed
+- Both services are listening on the expected ports

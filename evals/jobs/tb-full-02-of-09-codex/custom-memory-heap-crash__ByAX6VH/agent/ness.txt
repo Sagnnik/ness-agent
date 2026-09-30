@@ -1,0 +1,13 @@
+Implemented the release-mode fix in `/app/user.cpp:6-11`.
+
+### Change
+`user_init()` now calls the custom libstdc++ facet-registration hook before `main.cpp` enables the custom heap. This ensures the registered facet nodes use normal `malloc/free` rather than storage from the heap that is later destroyed.
+
+### Verified
+- Release build: exits successfully.
+- Debug build: exits successfully.
+- Both modes produce the expected Monte Carlo output.
+- Both modes pass five repeated runs with `MALLOC_CHECK_=3` and `MALLOC_PERTURB_=165`.
+- Only `/app/user.cpp` was edited.
+
+Valgrind could not run in this environment: it segfaults inside its loader even for `/bin/true`, before the target program starts. The fix ensures the affected allocations have matching `malloc/free` lifetimes, so they do not leak or reference the destroyed custom heap.
