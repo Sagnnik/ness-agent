@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ def test_runtime_connects_without_cli_project_configuration(tmp_path: Path):
     spec = MCPServerSpec(
         name="echo",
         transport="stdio",
-        command="python",
+        command=sys.executable,
         args=(str(server),),
         cwd=tmp_path,
     )
@@ -89,5 +90,40 @@ def test_runtime_rejects_duplicate_names_before_starting_any_server():
             await runtime.start([first, second])
         assert not runtime.states
         assert not runtime.tools
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("secret", "expected"),
+    [
+        ("literal-secret", "failed https://example.com/mcp token=[redacted]"),
+        ("xyz", "ValueError"),
+    ],
+)
+def test_runtime_redacts_startup_and_call_errors(secret, expected):
+    url = "https://example.com/mcp?token=url-secret"
+
+    async def failure(*args):
+        raise ValueError(f"failed {url} token={secret}")
+
+    class FailedSession:
+        call_tool = staticmethod(failure)
+
+    runtime = MCPRuntime(http_auth_factory=failure)
+    spec = MCPServerSpec(name="remote", transport="http", url=url, redactions=(secret,))
+
+    async def exercise():
+        try:
+            await runtime.start([spec])
+            assert runtime.states["remote"].status == "error"
+            assert runtime.states["remote"].error == expected
+            runtime.sessions["remote"] = FailedSession()
+            assert (
+                await runtime.call("remote", "echo", {})
+                == f"Error: MCP call failed: {expected}"
+            )
+        finally:
+            await runtime.stop()
 
     asyncio.run(exercise())

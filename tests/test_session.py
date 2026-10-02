@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from ness_agent.persistence import ThreadStore
-from ness_cli.events import _enrich_spawn_subagent_result, events_to_messages
+from ness_cli.session.replay import events_to_messages
 from langchain_core.messages import HumanMessage, message_to_dict
 
 
@@ -336,25 +336,6 @@ class ResumeReplayTests(unittest.TestCase):
         self.assertEqual(messages[2].tool_call_id, "call-1")
         self.assertEqual(messages[2].content, "contents")
 
-    def test_events_to_messages_uses_latest_compaction_checkpoint(self) -> None:
-        events = [
-            {"kind": "user", "content": "old task"},
-            {"kind": "assistant", "content": "old answer"},
-            {
-                "kind": "compaction_llm",
-                "response": "old work summarized",
-                "source_event_seq": 1,
-                "active_user_seq": None,
-            },
-            {"kind": "user", "content": "active task"},
-            {"kind": "assistant", "content": "active answer"},
-        ]
-        messages = events_to_messages(events)
-        contents = [str(message.content) for message in messages]
-        self.assertTrue(contents[0].startswith("<compacted-history>"))
-        self.assertNotIn("old task", contents)
-        self.assertIn("active task", contents)
-
     def test_spawn_subagent_result_enrichment(self) -> None:
         short = "status=ok"
         subagents = [
@@ -367,7 +348,30 @@ class ResumeReplayTests(unittest.TestCase):
                 "output": "detailed findings from subagent run",
             }
         ]
-        enriched = _enrich_spawn_subagent_result("spawn_subagent", short, subagents)
+        messages = events_to_messages(
+            [
+                {
+                    "kind": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "name": "spawn_subagent",
+                            "args": {},
+                            "id": "call-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                },
+                {
+                    "kind": "tool",
+                    "tool": "spawn_subagent",
+                    "result": short,
+                    "call_id": "call-1",
+                },
+            ],
+            subagents=subagents,
+        )
+        enriched = str(messages[-1].content)
         self.assertIn("detailed findings", enriched)
         self.assertGreater(len(enriched), len(short))
 

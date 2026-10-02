@@ -61,12 +61,11 @@ class AgentState(TypedDict, total=False):
     # one-shot signal for first act turn after plan→act.
     mode_switch: str
     
-    # skill names to hint this turn (from /skill or session stage_skills()).
-    activate_skills: list[str]
+    # Skill names requested for this turn by the host application.
+    requested_skills: list[str]
 
-    # Accumulated list of skills loaded via skill_view this session
-    # Shape: [{name, description, path}, ...]
-    loaded_skills: list[dict]
+    # Complete effective skill catalog to inject once through L3.
+    skill_catalog: str
 
     # ----- 4. Tools & approval -----
 

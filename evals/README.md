@@ -48,6 +48,23 @@ PYTHONPATH=. uv run --group evals harbor run \
 ```
 The auth file is not committed and must not be placed under `evals/jobs`.
 
+The Codex adapter is the frozen `ness-agent-0.2.4-codex-eval-v1` snapshot. Its
+Harbor installer reads the package pin from `evals/codex/codex_chat_model.py`
+and installs the released `ness-agent==0.2.4` in the sandbox. The runner checks
+that version and its legacy `ness_cli.provider.codex` layout before using the
+SDK. A current checkout with the ported `ness_cli.providers` layout is not a
+compatible replacement, even if its development version is still `0.2.4`.
+
+The conversion code, pricing estimates, and context windows in this eval copy
+stay independent of CLI changes. To upgrade an eval, create a new reviewed
+snapshot with a new revision/package pin and update its conversion, usage,
+cost, and sandbox compatibility tests together. Preserve the old snapshot and
+job configuration when reproducing historical runs.
+
+The release wheel verified for this snapshot is
+`ness_agent-0.2.4-py3-none-any.whl`, SHA-256
+`feb1fe05cdcd765f040cfd5ee5d4f358597d93ef8d4af8e0c7546e6d6196c121`.
+
 Codex subscription runs attach an API-equivalent cost estimate to each usage
 event. The standard short-context rates (USD per 1M tokens) are:
 

@@ -74,11 +74,13 @@ With an absent overlay, resolution installs `CodingOverlay`; use `NoOverlay()` t
 
 ```python
 await session.run(message: str, *, images: Sequence[str] | None = None,
+                  requested_skills: Sequence[str] | None = None,
                   active_skills: Sequence[str] | None = None,
                   mode: str | None = None) -> RunResult
 
 async for event in session.stream(message: str, *, images=None,
-                                  active_skills=None, mode=None): ...
+                                  requested_skills=None, active_skills=None,
+                                  mode=None): ...
 
 session.config -> NessAgentConfig
 session.cost_tracker -> CostTracker
@@ -102,7 +104,10 @@ Important control and inspection methods:
 | `cancel()` / `is_cancelled()` | Request and inspect cooperative cancellation of the active stream. |
 | `request_compact()` | Request compaction on the next turn. |
 | `configure_models(...)` | Replace this session's effective main/reflection models and context settings, then rebuild its graph. |
-| `active_skills(names)` / `stage_skills(names)` | Replace or append one-shot skills for the next turn. |
+| `requested_skills(names)` / `stage_skills(names)` | Replace or append one-shot skills for the next turn. |
+| `configure_skills(skills, *, disabled_skill_ids=())` | Install application-selected records as this session's discovery snapshot and replace its disabled-ID set. |
+| `set_skill_access(disabled_skill_ids)` | Replace this session's disabled-ID set and refresh its catalog. |
+| `refresh_skill_catalog()` | Schedule the current L3 catalog when `include_skill_catalog=False`; with L1 catalogs, the next system prompt already reflects access changes. |
 | `get_state()`, `get_messages()`, `get_todos()` | Async snapshots of the checkpointed state. |
 | `preview_context(mode=None) -> ContextPreview` | Assemble L0–L3 for debugging without running the model. |
 | `run_reflection()` | Immediately reflect on the unreflected conversation tail and return a `ReflectionResult`, regardless of automatic-reflection settings. |
@@ -110,6 +115,10 @@ Important control and inspection methods:
 | `rebuild_graph()` / `reset_checkpointer()` | Recompile the graph; the latter swaps in a fresh checkpointer before replay. |
 
 Source: `src/ness_agent/session.py`.
+
+Applications own skill defaults, storage, and resume policy. Each session starts with a fresh directory-backed loader; agent-loader snapshots and disabled IDs are not inherited. Apply `configure_skills()` or `set_skill_access()` to each session as needed. With `include_skill_catalog=False`, a custom overlay must render `ctx.skill_catalog`; staged requests require rendering `ctx.requested_skills`. Context previews include pending catalogs without consuming their delivery. Requests are limited to available skills. Viewed bodies remain in conversation history; no separate loaded-skill list is kept.
+
+`active_skills(names)` and the `active_skills=` argument on `run()`/`stream()` remain compatibility aliases. An explicit `requested_skills=` takes precedence. `OverlayContext.activate_skills` is a read-only compatibility alias for `requested_skills`; new context construction uses `requested_skills=`. The removed loaded-skill graph/context fields are not replaced with another tracking structure. After compaction, the compaction note carries a general reminder to reload relevant instructions when skills are available.
 
 ### Turn records and handler types
 
@@ -176,11 +185,11 @@ render_overlay_delta(sections, previous, *, skip=frozenset()) -> str
 wrap_system_reminder(body: str) -> str
 ```
 
-`OverlayContext` is the immutable per-turn input to a provider: thread id, mode, current messages/todos, session memory, compaction and mode-switch notes, metadata, Git snapshot, requested skills, and accumulated loaded skills. A custom provider must subclass `OverlayProvider`, return stable section names from `sections()`, and leave empty sections falsy. Stable names let the harness send only changed L3 sections during a tool loop.
+`OverlayContext` is the immutable per-turn input to a provider: thread id, mode, current messages/todos, session memory, compaction and mode-switch notes, metadata, Git snapshot, requested skills, and the current skill catalog. A custom provider must subclass `OverlayProvider`, return stable section names from `sections()`, and leave empty sections falsy. Stable names let the harness send only changed L3 sections during a tool loop.
 
 `CodingOverlay` is the default provider; it renders plan/act instructions, Git state, compaction status, todos, session memory, and skill information. `NoOverlay` always renders an empty mapping. `render_overlay_delta()` compares section dictionaries, and `wrap_system_reminder()` surrounds non-empty L3 content with the SDK’s system-reminder tags.
 
-`AgentState` is the checkpointed `TypedDict` used by the graph. Its public keys include `messages`, `todos`, `mode`, approval state, requested/loaded skills, reflection and compaction state, `force_compact`, input tokens, and `mode_switch`. Treat it as graph state, not a long-lived application schema.
+`AgentState` is the checkpointed `TypedDict` used by the graph. Its public keys include `messages`, `todos`, `mode`, approval state, requested skills and the skill catalog, reflection and compaction state, `force_compact`, input tokens, and `mode_switch`. Treat it as graph state, not a long-lived application schema.
 
 Sources: `src/ness_agent/context/overlay.py`, `context/coding_overlay.py`, and `graph/state.py`.
 
@@ -229,7 +238,12 @@ Hooks run on `preToolUse` and `postToolUse`. A matcher selects a tool; a callabl
 
 ```python
 SkillLoader(skills_dir: Path | None = None, *, skills_dirs: Sequence[Path] | None = None)
+loader.discover() -> list[dict[str, Any]]
+loader.all_skills() -> list[dict[str, Any]]
 loader.load() -> dict[str, dict[str, Any]]
+loader.set_snapshot(skills, *, disabled_skill_ids=()) -> None
+loader.set_disabled_skills(skill_ids) -> None
+loader.disabled_skill_ids -> frozenset[str]
 loader.render_catalog(skills) -> str
 
 default_skill_search_dirs(project_root: Path, *,
@@ -242,7 +256,9 @@ merge_skill_dirs(project_root: Path, skills_dir: Path, *,
 
 Loads `SKILL.md` files from the configured roots and returns parsed metadata/body records. Prefer `skills_dirs=` for an explicit exhaustive list; `skills_dir=` is the single-root shorthand. Earlier roots win on name collisions. `render_catalog()` creates the compact stable-prefix catalog; full skill bodies remain on demand.
 
-`default_skill_search_dirs()` returns the well-known project-local and user-global agent skill roots (it does not include `.ness/skills`). `merge_skill_dirs()` puts your directory first, then those roots, deduped by resolved path. Pass `project_rels=` / `global_rels=` to restrict either set. The SDK never scans these roots unless the host passes them via `AgentSpec.skills_dirs`.
+`discover()` groups byte-identical bundles into logical records with `skill_id`, `name`, `description`, `body`, `source`, and physical `sources`. Bundle IDs are content fingerprints. `all_skills()` returns snapshot records when configured, or discovers the roots, including disabled and shadowed records. `load()` excludes disabled IDs and selects the first available record per name. `set_snapshot()` replaces discovery records and access choices for that loader; without a snapshot, edits can change IDs on subsequent discovery. Prefer the public `Session` methods for live session changes because they also refresh catalog delivery. The built-in `skill_view` requires local source paths to enumerate bundle resources.
+
+`default_skill_search_dirs()` returns the well-known project-local roots, then user-global roots, with `.agents/skills` first in each scope. The CLI uses this list and does not discover `.ness/skills`. `merge_skill_dirs()` puts your application-specific directory first, then those roots, deduped by resolved path. Pass `project_rels=` / `global_rels=` to restrict either set. The SDK never scans these roots unless the host passes them via `AgentSpec.skills_dirs`.
 
 Source: `src/ness_agent/skills.py`.
 

@@ -294,7 +294,7 @@ class PromptLayers:
             git_available,
             hash(user_memory),
             hash(project_memory),
-            hash(skill_catalog),
+            hash(skill_catalog) if self.config.include_skill_catalog else 0,
             tool_catalog_groups,
             deferred_mcp,
             _hash_metadata(metadata),

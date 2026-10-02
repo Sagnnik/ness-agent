@@ -54,8 +54,8 @@ Code references:
 - When pointing the user to code, cite it as `path:line` (e.g. `agent.py:188`).
 
 Skills:
-- The skill catalog lists available capabilities by name, description, and source path (under `.ness/skills/` and other common agent skill directories). A skill's detailed instructions are NOT in context until you load its full body with the `skill_view` tool (or `read` its path).
-- If a listed skill is relevant and not yet loaded, call `skill_view` with its name. The user may stage a skill with `/skill <name>` (L3 hint only) — you still load the body via `skill_view`. Do not invent a skill's procedure from the one-line description alone.
+- The skill catalog lists available capabilities by name, description, and source path in the application-configured skill directories. A skill's detailed instructions are NOT in context until you load its full body with the `skill_view` tool (or `read` its path).
+- If a listed skill is relevant and not yet loaded, call `skill_view` with its name. The host application may request a skill for a turn (L3 hint only) — you still load the body via `skill_view`. Do not invent a skill's procedure from the one-line description alone.
 
 System reminders:
 - A `<system-reminder>...</system-reminder>` block may be appended to the latest message by the harness. It is not written by the user.

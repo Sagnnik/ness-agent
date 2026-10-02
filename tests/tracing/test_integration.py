@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-import tempfile
 
-import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -26,10 +24,9 @@ from ness_agent.tracing.semconv import (
     INPUT_TOKENS,
     LLM_CALL,
     OUTPUT_TOKENS,
-    TOOL_EXEC,
     TURN,
 )
-from ness_agent.tracing.tracer import InMemorySpan, MultiTracer, NoopTracer
+from ness_agent.tracing.tracer import InMemorySpan
 
 
 class StubChatModel(BaseChatModel):
@@ -109,7 +106,7 @@ class CapturingTracer:
         return span
 
 
-def _agent(tmp_path: Path, tracer, *, capture_messages: bool = False, max_message_length: int = 10000) -> NessAgent:
+def _agent(tmp_path: Path, tracer) -> NessAgent:
     @tool
     def ping() -> str:
         """Return pong."""
@@ -121,7 +118,7 @@ def _agent(tmp_path: Path, tracer, *, capture_messages: bool = False, max_messag
         prompt=PromptLayers(PromptLayersConfig(l0="L0", persona="P")),
         options=NessAgentOptions(ness_dir=tmp_path / ".ness", project_root=tmp_path),
         tracer=tracer,
-        tracing=TracingConfig(capture_messages=capture_messages, max_message_length=max_message_length),
+        tracing=TracingConfig(),
     )
 
 
@@ -134,32 +131,18 @@ def _run_session(session):
     return asyncio.run(_run())
 
 
-def test_session_emits_turn_and_llm_call_spans(tmp_path: Path):
-    capture = CapturingTracer()
-    agent = _agent(tmp_path, capture)
-    session = agent.session(thread_id="trace-1")
-    _run_session(session)
-    names = [s.name for s in capture.spans]
-    assert TURN in names
-    assert LLM_CALL in names
-
-
-def test_turn_span_attributes_thread_id_and_mode(tmp_path: Path):
-    capture = CapturingTracer()
-    agent = _agent(tmp_path, capture)
-    session = agent.session(thread_id="trace-attr")
-    _run_session(session)
-    turn = next(s for s in capture.spans if s.name == TURN)
-    assert turn.attributes["session.thread_id"] == "trace-attr"
-    assert turn.attributes["session.mode"] == "act"
-
-
-def test_llm_span_records_usage_attrs(tmp_path: Path):
+def test_session_records_turn_and_llm_usage_spans(tmp_path: Path):
     capture = CapturingTracer()
     agent = _agent(tmp_path, capture)
     session = agent.session(thread_id="trace-usage")
-    _run_session(session)
-    llm = next(s for s in capture.spans if s.name == LLM_CALL)
+    events = _run_session(session)
+    assert not any(event.kind == "error" for event in events)
+    finals = [event.data["content"] for event in events if event.kind == "assistant_final"]
+    assert finals[-1] == "hi there"
+    turn = next(span for span in capture.spans if span.name == TURN)
+    assert turn.attributes["session.thread_id"] == "trace-usage"
+    assert turn.attributes["session.mode"] == "act"
+    llm = next(span for span in capture.spans if span.name == LLM_CALL)
     assert llm.attributes[INPUT_TOKENS] == 100
     assert llm.attributes[OUTPUT_TOKENS] == 5
     assert llm.attributes[CACHE_READ_TOKENS] == 20
@@ -171,32 +154,26 @@ def test_llm_span_records_usage_attrs(tmp_path: Path):
 # gen_ai.prompt / gen_ai.completion / gen_ai.tool.call.* capture
 # ---------------------------------------------------------------------------
 
-def test_llm_span_records_prompt_and_completion_when_enabled(tmp_path: Path):
-    capture = CapturingTracer()
-    agent = _agent(tmp_path, capture, capture_messages=True)
-    session = agent.session(thread_id="capture-llm")
-    _run_session(session)
-    llm = next(s for s in capture.spans if s.name == LLM_CALL)
-    # prompt is a JSON array of OpenAI-style messages with role keys.
-    import json as _json
-    prompt = _json.loads(llm.attributes[GEN_AI_PROMPT])
-    assert isinstance(prompt, list)
-    assert any(m.get("role") == "system" for m in prompt)
-    assert any(m.get("role") == "user" for m in prompt)
-    completion = _json.loads(llm.attributes[GEN_AI_COMPLETION])
-    assert isinstance(completion, list)
-    assert completion[0]["role"] == "assistant"
+def test_opt_in_capture_records_llm_messages_and_tool_execution(tmp_path: Path):
+    import json
 
-
-def test_tool_span_records_arguments_and_result_when_enabled(tmp_path: Path):
     capture = CapturingTracer()
     agent = _tool_agent(tmp_path, capture, capture_messages=True)
     session = agent.session(thread_id="capture-tool")
-    _run_session(session)
-    tool_span = next(s for s in capture.spans if s.name.startswith("tool."))
-    import json as _json
-    args = _json.loads(tool_span.attributes[GEN_AI_TOOL_CALL_ARGUMENTS])
-    assert args == {}  # ping() takes no args
+    events = _run_session(session)
+    assert not any(event.kind == "error" for event in events)
+    finals = [event.data["content"] for event in events if event.kind == "assistant_final"]
+    assert finals[-1] == "done"
+    llm = next(span for span in capture.spans if span.name == LLM_CALL)
+    prompt = json.loads(llm.attributes[GEN_AI_PROMPT])
+    assert isinstance(prompt, list)
+    assert any(message.get("role") == "system" for message in prompt)
+    assert any(message.get("role") == "user" for message in prompt)
+    completion = json.loads(llm.attributes[GEN_AI_COMPLETION])
+    assert isinstance(completion, list)
+    assert completion[0]["role"] == "assistant"
+    tool_span = next(span for span in capture.spans if span.name.startswith("tool."))
+    assert json.loads(tool_span.attributes[GEN_AI_TOOL_CALL_ARGUMENTS]) == {}
     assert tool_span.attributes[GEN_AI_TOOL_CALL_RESULT] == "pong"
 
 
@@ -263,7 +240,7 @@ def test_tool_result_truncation_respects_max_length(tmp_path: Path):
     assert result.endswith("...[truncated]")
 
 
-def _tool_agent(tmp_path: Path, tracer, *, capture_messages: bool = False, max_message_length: int = 10000) -> NessAgent:
+def _tool_agent(tmp_path: Path, tracer, *, capture_messages: bool = False) -> NessAgent:
     """Build an agent whose StubChatModel emits one real tool call so the
     tool-execution span is exercised end-to-end."""
     @tool
@@ -277,7 +254,7 @@ def _tool_agent(tmp_path: Path, tracer, *, capture_messages: bool = False, max_m
         prompt=PromptLayers(PromptLayersConfig(l0="L0", persona="P")),
         options=NessAgentOptions(ness_dir=tmp_path / ".ness", project_root=tmp_path),
         tracer=tracer,
-        tracing=TracingConfig(capture_messages=capture_messages, max_message_length=max_message_length),
+        tracing=TracingConfig(capture_messages=capture_messages),
     )
     # Custom user-supplied tools are filtered out of the active set by
     # ToolRegistry unless they are built-ins or explicitly included. Activate

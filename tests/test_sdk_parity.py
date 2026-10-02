@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
@@ -15,7 +16,6 @@ from ness_agent import (
     PromptLayers,
     PromptLayersConfig,
     Session,
-    SessionEvent,
 )
 from ness_agent.graph.nodes import make_nodes
 from ness_agent.options import ModeConfig, NessAgentOptions
@@ -308,21 +308,11 @@ def test_approval_deny_preserves_sibling_tools(tmp_path: Path):
         reset_session_context(ctx_token)
 
 
-def test_session_emits_assistant_events():
-    agent = _agent()
-    session = agent.session(thread_id="t-stream")
-
-    async def _run():
-        events = []
-        async for ev in session.stream("hello"):
-            events.append(ev.kind)
-        assert "assistant_delta" in events or "assistant_final" in events or "error" in events
-
-    asyncio.run(_run())
-
-
-def test_session_context_restored_after_turn(tmp_path: Path):
-    """Turn install must reset SessionContext so a prior CLI install is restored."""
+@pytest.mark.parametrize("with_prior", [False, True])
+@pytest.mark.parametrize("model_fails", [False, True])
+def test_session_context_restored_on_success_and_failure(
+    tmp_path: Path, with_prior, model_fails
+):
     from ness_agent.session_context import (
         SessionContext,
         set_session_context,
@@ -330,60 +320,48 @@ def test_session_context_restored_after_turn(tmp_path: Path):
         try_get_session_context,
     )
 
-    agent = _agent(
-        options=NessAgentOptions(project_root=tmp_path, ness_dir=tmp_path / ".ness"),
-    )
+    error = RuntimeError("context-cleanup model failure") if model_fails else None
+    agent = _bindable_agent(tmp_path, error=error)
     session = agent.session(thread_id="t-ctx-reset")
-    prior = SessionContext(
-        permissions=agent.config.permission_store,
-        options=agent.config.options,
-        thread_store=agent.config.thread_store,
-        ness_dir=tmp_path / ".ness",
-        project_root=tmp_path,
-        agent_config=agent.config,
-        all_skills={"marker": {"name": "marker"}},
+    prior = (
+        SessionContext(
+            permissions=agent.config.permission_store,
+            options=agent.config.options,
+            thread_store=agent.config.thread_store,
+            ness_dir=tmp_path / ".ness",
+            project_root=tmp_path,
+            agent_config=agent.config,
+            available_skills={"marker": {"name": "marker"}},
+        )
+        if with_prior
+        else None
     )
-    # Isolate from ContextVar leaks left by other tests in the process.
-    baseline = set_session_context(None)
-    prior_token = set_session_context(prior)
+    token = set_session_context(prior)
     try:
-        async def _run():
+        async def exercise():
             assert try_get_session_context() is prior
-            async for _ in session.stream("hello"):
-                pass
+            events = [event async for event in session.stream("hello")]
+            if model_fails:
+                assert any(
+                    event.kind == "error"
+                    and "context-cleanup model failure" in event.data["message"]
+                    for event in events
+                )
+            else:
+                assert not any(event.kind == "error" for event in events)
+                assert any(
+                    event.kind == "assistant_final"
+                    and event.data["content"] == "FINAL-ANSWER"
+                    for event in events
+                )
             restored = try_get_session_context()
             assert restored is prior
-            assert restored.all_skills == {"marker": {"name": "marker"}}
+            if with_prior:
+                assert restored.available_skills == {"marker": {"name": "marker"}}
 
-        asyncio.run(_run())
+        asyncio.run(exercise())
     finally:
-        reset_session_context(prior_token)
-        reset_session_context(baseline)
-
-
-def test_session_context_cleared_when_no_prior(tmp_path: Path):
-    from ness_agent.session_context import (
-        set_session_context,
-        reset_session_context,
-        try_get_session_context,
-    )
-
-    agent = _agent(
-        options=NessAgentOptions(project_root=tmp_path, ness_dir=tmp_path / ".ness"),
-    )
-    session = agent.session(thread_id="t-ctx-clear")
-    baseline = set_session_context(None)
-    try:
-        assert try_get_session_context() is None
-
-        async def _run():
-            async for _ in session.stream("hello"):
-                pass
-            assert try_get_session_context() is None
-
-        asyncio.run(_run())
-    finally:
-        reset_session_context(baseline)
+        reset_session_context(token)
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +428,7 @@ def _stream_session(session, message="hi", **kwargs):
     return asyncio.run(_run())
 
 
-def test_bootstrap_seeds_next_payload():
+def test_bootstrap_seeds_exactly_one_turn():
     agent = _agent()
     session = agent.session(thread_id="t-boot")
     fake = _FakeApp([{"event": "on_chain_end", "name": "agent", "data": {"output": {"messages": []}}}])
@@ -458,92 +436,31 @@ def test_bootstrap_seeds_next_payload():
 
     session.bootstrap([HumanMessage(content="seed")])
     _stream_session(session)
-
     assert fake.last_payload is not None
-    msgs = fake.last_payload["messages"]
-    assert any(getattr(m, "content", None) == "seed" for m in msgs)
+    assert [message.content for message in fake.last_payload["messages"]] == [
+        "seed", "hi"
+    ]
+
+    _stream_session(session, "next turn")
+    assert [message.content for message in fake.last_payload["messages"]] == ["next turn"]
 
 
-def test_bootstrap_cleared_after_one_turn():
-    agent = _agent()
-    session = agent.session(thread_id="t-boot2")
-    fake = _FakeApp([{"event": "on_chain_end", "name": "agent", "data": {"output": {"messages": []}}}])
-    session._app = fake
-
-    session.bootstrap([HumanMessage(content="seed")])
-    _stream_session(session)
-    # Bootstrap should be consumed; a second turn has no seeding.
-    fake.last_payload = None
-    _stream_session(session)
-    msgs = fake.last_payload["messages"]
-    assert not any(getattr(m, "content", None) == "seed" for m in msgs)
-
-
-def test_on_plan_turn_invoked_on_plan_mode():
-    agent = _agent()
-    seen = {}
-
-    def hook(text):
-        seen["text"] = text
-
-    session = agent.session(thread_id="t-plan", on_plan_turn=hook)
-    session.set_mode("plan")
-    # Fake a model that emits assistant text via on_chat_model_end with name=agent.
-    fake = _FakeApp(
-        [
-            {
-                "event": "on_chat_model_end",
-                "name": "agent",
-                "data": {"output": {"messages": []}},
-            },
-        ]
+@pytest.mark.parametrize("with_hook", [False, True])
+def test_plan_turn_delivers_real_answer_to_hook_or_event(tmp_path: Path, with_hook):
+    agent = _bindable_agent(tmp_path, "PLAN OK")
+    received = []
+    session = agent.session(
+        thread_id="t-plan",
+        mode="plan",
+        on_plan_turn=received.append if with_hook else None,
     )
-    session._app = fake
-
-    # Patch _dispatch_stream_event to feed fixed assistant text, since the
-    # FakeListChatModel backing the agent won't emit "PLAN OK" through the
-    # fake app's static event list.
-    original_dispatch = session._dispatch_stream_event
-
-    def fake_dispatch(ev, assistant_text):
-        # Drive assistant_text forward as if a token chunk landed.
-        if ev.get("event") == "on_chat_model_end" and ev.get("name") == "agent":
-            return [(SessionEvent("assistant_final", {"content": "PLAN OK"}), "PLAN OK")]
-        return original_dispatch(ev, assistant_text)
-
-    session._dispatch_stream_event = fake_dispatch
-    _stream_session(session)
-
-    assert seen.get("text") == "PLAN OK"
-
-
-def test_plan_turn_event_emitted_when_no_hook():
-    agent = _agent()
-    session = agent.session(thread_id="t-plan-evt")
-    session.set_mode("plan")
-    fake = _FakeApp(
-        [
-            {
-                "event": "on_chat_model_end",
-                "name": "agent",
-                "data": {"output": {"messages": []}},
-            },
-        ]
-    )
-    session._app = fake
-
-    original_dispatch = session._dispatch_stream_event
-
-    def fake_dispatch(ev, assistant_text):
-        if ev.get("event") == "on_chat_model_end" and ev.get("name") == "agent":
-            return [(SessionEvent("assistant_final", {"content": "plan text"}), "plan text")]
-        return original_dispatch(ev, assistant_text)
-
-    session._dispatch_stream_event = fake_dispatch
     events = _stream_session(session)
-
-    kinds = [ev.kind for ev in events]
-    assert "plan_turn" in kinds
+    assert not any(event.kind == "error" for event in events)
+    finals = [event.data["content"] for event in events if event.kind == "assistant_final"]
+    assert finals[-1] == "PLAN OK"
+    plans = [event.data["text"] for event in events if event.kind == "plan_turn"]
+    assert received == (["PLAN OK"] if with_hook else [])
+    assert plans == ([] if with_hook else ["PLAN OK"])
 
 
 def test_session_cancel_synthesises_failed_toolmessage():
@@ -698,8 +615,9 @@ class _BindableFakeModel:
     it and the SDK can emit ``assistant_final``.
     """
 
-    def __init__(self, text: str = "FINAL-ANSWER") -> None:
+    def __init__(self, text: str = "FINAL-ANSWER", error: Exception | None = None) -> None:
         self.text = text
+        self.error = error
         self.calls = 0
 
     def bind_tools(self, tools):
@@ -707,6 +625,8 @@ class _BindableFakeModel:
 
     async def ainvoke(self, messages, **kwargs):
         self.calls += 1
+        if self.error is not None:
+            raise self.error
         return AIMessage(content=self.text)
 
     @property
@@ -714,7 +634,9 @@ class _BindableFakeModel:
         return "bindfake"
 
 
-def _bindable_agent(tmp_path: Path, text: str = "FINAL-ANSWER"):
+def _bindable_agent(
+    tmp_path: Path, text: str = "FINAL-ANSWER", *, error: Exception | None = None
+):
     @tool
     def ping() -> str:
         """Return pong."""
@@ -723,7 +645,7 @@ def _bindable_agent(tmp_path: Path, text: str = "FINAL-ANSWER"):
     from ness_agent.options import NessAgentOptions
 
     return NessAgent(
-        model=_BindableFakeModel(text),
+        model=_BindableFakeModel(text, error),
         tools=[ping],
         prompt=PromptLayers(PromptLayersConfig(l0="L0", persona="P")),
         options=NessAgentOptions(project_root=tmp_path, ness_dir=tmp_path / ".ness"),
@@ -773,69 +695,45 @@ def test_mode_override_is_turn_only_and_restores(tmp_path: Path):
     assert session.mode == "act", "mode override leaked across turns"
 
 
-def test_pending_skills_consumed_and_cleared_after_turn():
-    """Finding 7: ``_pending_skills`` was never cleared, so skills activated
-    once stayed active on every subsequent turn. After a turn that falls back
-    to pending, the stash must be empty.
-    """
+def test_staged_skills_replace_append_override_and_consume_once():
     agent = _agent()
     session = agent.session(thread_id="t-skills")
-    session.active_skills(["stale-skill"])
+    fake = _FakeApp([])
+    session._app = fake
 
-    payload, _cfg = asyncio.run(
-        session._build_run_payload(
-            HumanMessage(content="hi"),
-            active_skills=None,
-            mode_switch="",
-        )
-    )
-    assert payload["activate_skills"] == ["stale-skill"]
-    # Consumed and cleared.
-    assert session._pending_skills == []
-
-    # Next turn falls back to the (now empty) pending list — no leak.
-    payload2, _cfg2 = asyncio.run(
-        session._build_run_payload(
-            HumanMessage(content="again"),
-            active_skills=None,
-            mode_switch="",
-        )
-    )
-    assert payload2["activate_skills"] == []
-
-
-def test_explicit_active_skills_does_not_consume_pending():
-    """Passing ``active_skills`` explicitly overrides + does not touch the
-    pending stash (the one-shot stash is only consumed on the fallback path).
-    """
-    agent = _agent()
-    session = agent.session(thread_id="t-skills2")
-    session.active_skills(["pending"])
-
-    payload, _cfg = asyncio.run(
-        session._build_run_payload(
-            HumanMessage(content="hi"),
-            active_skills=["explicit"],
-            mode_switch="",
-        )
-    )
-    assert payload["activate_skills"] == ["explicit"]
-    assert session._pending_skills == ["pending"]
-
-
-def test_stage_skills_appends_and_dedupes():
-    agent = _agent()
-    session = agent.session(thread_id="t-stage")
-    session.stage_skills(["a", "b"])
+    session.requested_skills(["stale"])
+    session.requested_skills(["a", "b"])
     session.stage_skills(["b", "c"])
-    assert session._pending_skills == ["a", "b", "c"]
 
-    payload, _ = asyncio.run(
-        session._build_run_payload(
-            HumanMessage(content="hi"),
-            active_skills=None,
-            mode_switch="",
-        )
-    )
-    assert payload["activate_skills"] == ["a", "b", "c"]
-    assert session._pending_skills == []
+    _stream_session(session, requested_skills=["explicit"])
+    assert fake.last_payload["requested_skills"] == ["explicit"]
+
+    _stream_session(session, "consume staged skills")
+    assert fake.last_payload["requested_skills"] == ["a", "b", "c"]
+
+    _stream_session(session, "no skills left")
+    assert fake.last_payload["requested_skills"] == []
+
+
+@pytest.mark.parametrize("entrypoint", ["run", "stream"])
+def test_existing_active_skills_calls_use_requested_state(entrypoint):
+    agent = _agent()
+    session = agent.session(thread_id="t-legacy-skills")
+    fake = _FakeApp([])
+    session._app = fake
+    session.active_skills(["staged"])
+
+    async def run():
+        if entrypoint == "run":
+            await session.run("explicit", active_skills=["legacy"])
+            assert fake.last_payload["requested_skills"] == ["legacy"]
+            await session.run("consume staged")
+        else:
+            async for _ in session.stream("explicit", active_skills=["legacy"]):
+                pass
+            assert fake.last_payload["requested_skills"] == ["legacy"]
+            async for _ in session.stream("consume staged"):
+                pass
+        assert fake.last_payload["requested_skills"] == ["staged"]
+
+    asyncio.run(run())

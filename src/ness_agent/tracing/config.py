@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 # USD per 1M tokens: (input_per_1m, output_per_1m, cache_read_ratio).
-# Keys are matched as case-insensitive substrings of the model name.
+# Keys match case-insensitive substrings; the longest matching key wins.
 PricingDict = dict[str, tuple[float, float, float]]
 
 

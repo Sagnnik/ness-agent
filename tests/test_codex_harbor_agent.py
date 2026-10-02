@@ -11,7 +11,19 @@ import pytest
 pytest.importorskip("harbor")
 
 from evals.codex.ness_harbor_agent import NessAgent as CodexNessAgent
+from evals.codex.codex_chat_model import EVAL_NESS_VERSION
 from evals.ness_harbor_agent import NessAgent as OpenRouterNessAgent
+
+
+def test_codex_installer_uses_the_frozen_eval_package_pin(tmp_path):
+    assert CodexNessAgent.NESS_VERSION == EVAL_NESS_VERSION == "0.2.4"
+    agent = CodexNessAgent(logs_dir=tmp_path, model_name="codex/gpt-5.6-luna")
+    with (
+        patch.object(agent, "ensure_system_dependencies", new=AsyncMock()),
+        patch.object(agent, "exec_as_agent", new=AsyncMock()) as execute,
+    ):
+        asyncio.run(agent.install(SimpleNamespace()))
+    assert "ness-agent==0.2.4" in execute.await_args.kwargs["command"]
 
 
 @pytest.mark.parametrize("failed_command", ["chown ", "chmod "])

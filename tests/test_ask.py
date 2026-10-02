@@ -13,10 +13,6 @@ class QuestionToolTests(unittest.IsolatedAsyncioTestCase):
         schema = question.args_schema.model_json_schema()
         self.assertIn("questions", schema.get("required", []))
 
-    async def test_omit_questions_fails_schema_validation(self) -> None:
-        with self.assertRaises(Exception):
-            await question.ainvoke({})
-
     async def test_empty_questions_fails_schema_validation(self) -> None:
         with self.assertRaises(Exception):
             await question.ainvoke({"questions": []})

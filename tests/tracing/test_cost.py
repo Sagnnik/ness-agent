@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ness_agent.tracing.cost import CostTracker, TokenUsage
+from ness_agent.tracing.cost import CostTracker
 
 
 def _fake_usage(input_tokens=100, output_tokens=20, cache_read=0, cache_write=0):
@@ -111,3 +111,14 @@ def test_cost_tracker_handles_none_usage():
     tracker = CostTracker(pricing={"gpt-4o": (2.50, 10.00, 0.50)})
     assert tracker.add(None, model_name="gpt-4o") is None
     assert tracker.add({}, model_name="gpt-4o") is None  # falsy usage object
+
+
+@pytest.mark.parametrize("name", ["model-a-plus", "MODEL-A-PLUS", "vendor/model-a-plus-2026"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_specific_model_rates_win_over_earlier_family_rates(name, reverse):
+    entries = [("model-a", (1, 2, 0.25)), ("Model-A-Plus", (4, 8, 0.25))]
+    tracker = CostTracker(pricing=dict(reversed(entries) if reverse else entries))
+
+    result = tracker.add(_fake_usage(input_tokens=1000, output_tokens=100), name)
+
+    assert result.cost_usd == pytest.approx(0.0048)

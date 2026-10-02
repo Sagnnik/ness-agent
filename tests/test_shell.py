@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import sys
 import tempfile
 import time
 import unittest
@@ -20,6 +22,10 @@ def _field(result: str, name: str) -> str:
 
 def _shell_dir() -> Path:
     return get_session_context().ness_dir / "runtime" / "shells"
+
+
+def _python_command(code: str) -> str:
+    return shlex.join([sys.executable, "-c", code])
 
 
 class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
@@ -86,7 +92,9 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         result = shell.shell.invoke(
             {
                 "action": "run",
-                "command": "python -c 'import sys,time; sys.stdout.write(\"x\"); sys.stdout.flush(); time.sleep(5)'",
+                "command": _python_command(
+                    'import sys,time; sys.stdout.write("x"); sys.stdout.flush(); time.sleep(5)'
+                ),
                 "timeout": 1,
             }
         )
@@ -101,11 +109,11 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         result = shell.shell.invoke(
             {
                 "action": "run",
-                "command": (
-                    "python -c 'import pathlib,subprocess,time; "
+                "command": _python_command(
+                    "import pathlib,subprocess,time; "
                     "p=subprocess.Popen([\"sleep\",\"10\"]); "
                     "pathlib.Path(\"child.pid\").write_text(str(p.pid)); "
-                    "time.sleep(10)'"
+                    "time.sleep(10)"
                 ),
                 "timeout": 1,
             }
@@ -123,7 +131,7 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         result = shell.shell.invoke(
             {
                 "action": "run",
-                "command": "python -c 'print(\"abcdef\")'",
+                "command": _python_command('print("abcdef")'),
                 "max_output_chars": 4,
             }
         )
@@ -183,11 +191,11 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         started = shell.shell.invoke(
             {
                 "action": "start",
-                "command": (
-                    "python -c 'import pathlib,signal,time; "
+                "command": _python_command(
+                    "import pathlib,signal,time; "
                     "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                     "pathlib.Path(\"ready.pid\").write_text(\"1\"); "
-                    "time.sleep(30)'"
+                    "time.sleep(30)"
                 ),
             }
         )

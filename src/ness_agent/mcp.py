@@ -209,7 +209,9 @@ class MCPRuntime:
         stack = AsyncExitStack()
         await stack.__aenter__()
         try:
-            connect = self._connect_stdio if spec.transport == "stdio" else self._connect_http
+            connect = (
+                self._connect_stdio if spec.transport == "stdio" else self._connect_http
+            )
             await asyncio.wait_for(connect(spec, stack), timeout=spec.startup_timeout)
             self._stacks[name] = stack
             if not ready.done():
@@ -341,6 +343,40 @@ class MCPRuntime:
         )
 
 
+def redact_url(value: str) -> str:
+    """Strip URL credentials, query, and fragment; mask malformed URLs.
+
+    This formats diagnostic text; it does not validate a connection URL.
+    """
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    except ValueError:
+        return "[invalid URL]"
+
+
+def redact_text(
+    value: str, secrets: tuple[str, ...], *, fallback: str = "[redacted]"
+) -> str:
+    """Replace literal secrets, longest first, ignoring empty secrets.
+
+    A matching secret shorter than four characters replaces the whole message
+    with ``fallback`` to avoid exposing fragments or corrupting ordinary words.
+    Callers still need to escape text for their output format.
+    """
+    result = value
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        if not secret or secret not in result:
+            continue
+        if len(secret) < 4:
+            return fallback
+        result = result.replace(secret, "[redacted]")
+    return result
+
+
 def validate_mcp_http_url(value: str) -> str | None:
     """Return an error when a resolved MCP HTTP URL is unsafe or malformed."""
     try:
@@ -379,35 +415,11 @@ def _validate_server_spec(spec: MCPServerSpec) -> None:
         raise ValueError(error)
 
 
-def _safe_url(value: str) -> str:
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname or ""
-        if parts.port:
-            host = f"{host}:{parts.port}"
-        return urlunsplit((parts.scheme, host, parts.path, "", ""))
-    except ValueError:
-        return "[invalid URL]"
-
-
-def _redact_text(
-    value: str, secrets: tuple[str, ...], *, fallback: str = "[redacted]"
-) -> str:
-    result = value
-    for secret in sorted(set(secrets), key=len, reverse=True):
-        if not secret or secret not in result:
-            continue
-        if len(secret) < 4:
-            return fallback
-        result = result.replace(secret, "[redacted]")
-    return result
-
-
 def _redact_error(exc: BaseException, spec: MCPServerSpec) -> str:
     message = str(exc) or type(exc).__name__
     if spec.url:
-        message = message.replace(spec.url, _safe_url(spec.url))
-    return _redact_text(message, spec.redactions, fallback=type(exc).__name__)
+        message = message.replace(spec.url, redact_url(spec.url))
+    return redact_text(message, spec.redactions, fallback=type(exc).__name__)
 
 
 def _is_auth_required(exc: BaseException) -> bool:

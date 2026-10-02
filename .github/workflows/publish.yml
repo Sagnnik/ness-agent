@@ -6,22 +6,24 @@ on:
       - "v*"
 
 permissions:
-  id-token: write
+  contents: read
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv and setup Python
-        uses: astral-sh/setup-uv@v5
+      - name: Download verified packages
+        uses: actions/download-artifact@v4
         with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Build package
-        run: uv build
+          name: verified-packages
+          path: dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

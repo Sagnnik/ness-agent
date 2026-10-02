@@ -4,13 +4,21 @@ Ness Agent is split into a reusable **SDK** and a **coding CLI adapter** (Ness).
 
 | Path | Role |
 |------|------|
-| `src/ness_agent/` | SDK — LangGraph agent loop, tools (files, search, web, shell, todos, `question`, subagents), permissions, memory, persistence, prompt layers/overlays, MCP, skills, hooks, compaction, reflection, and tracing |
-| `src/ness_cli/` | Coding adapter — `build_coding_agent` / `CodingSession`, path resolver, chat model factory, settings/pricing, rollback, and git worktree bootstrap |
-| `src/ness_cli/tui/` | Ness TUI entry (`ness` / `ness_cli.tui.main`), streaming, slash commands, and clipboard handling |
+| `src/ness_agent/` | SDK agent loop, tools, permissions, memory, persistence, prompt layers, MCP transport, skills, hooks, compaction, reflection, and tracing |
+| `src/ness_cli/main.py`, `cli.py` | `ness_cli.main:main` console entry, worktree bootstrap, argument parsing, and interactive/headless dispatch |
+| `src/ness_cli/runtime.py` | Runtime construction and cleanup; shared configuration, providers, MCP, and creation of thread-bound SDK sessions |
+| `src/ness_cli/config/`, `providers/` | Settings and credential persistence; instance-owned provider adapters, model selection, catalogs, and pricing metadata |
+| `src/ness_cli/session/` | `CodingSession`, CLI turn persistence, replay, rollback, plans, skills state, goals, and export |
+| `src/ness_cli/mcp/` | Project MCP configuration, import, trust, OAuth, and management commands |
+| `src/ness_cli/tui/` | Prompt-toolkit app, controller, command context, input, streaming display, and transcript |
+| `src/ness_cli/paths.py`, `workspace.py` | Global/project path resolution and Git worktree operations |
+| `src/ness_cli/headless.py` | One-shot execution, automatic question responses, output, and exit status |
 
 **Ness Agent** is the project and Python package. **Ness** is the interactive CLI (`ness` command).
 
 See also: [SDK guide](sdk.md) · [CLI guide](cli.md) · [Configuration](configuration.md)
+
+The [current CLI cutover record](cli-cutover.md) identifies the active package and remaining release checks. `ness_agent` is the application SDK. `ness_cli` runtime and session modules are internal CLI implementation APIs and may change with the CLI.
 
 ### Runtime ownership
 
@@ -18,19 +26,38 @@ See also: [SDK guide](sdk.md) · [CLI guide](cli.md) · [Configuration](configur
 
 | Scope | State |
 |------|------|
-| Agent/project | Thread persistence, memory backend, hooks, skill loader, tool definitions and MCP catalog, persistent permission file/lock, tracer, pricing, and defaults inherited by future sessions |
-| Session/thread | Effective main/reflection models and options, temporary permission rules, active MCP tools and binding cache, cost totals, graph/checkpointer, event queue, cancellation token, mode, metadata, and adapter callbacks |
+| Agent/project | Thread database and writer lock, memory backend, hooks, skill loader, tool definitions and MCP catalog, persistent permission file/lock, tracer, pricing, and defaults inherited by future sessions |
+| Session/thread | Effective main/reflection models and options, persistence view and autosave policy, temporary permission rules, active MCP tools and binding cache, cost totals, graph/checkpointer, event queue, cancellation token, mode, metadata, and adapter callbacks |
 | Turn | User input, optional mode/skill overrides, usage aggregate, streamed events, and active cancellation state |
 
 Live model usage is recorded in the session tracker and propagated once to the agent aggregate. Durable replay updates only the session tracker, so resuming a thread does not look like newly incurred provider spend. Persistent permission choices are shared through `permissions.json`; temporary `session` choices stay on the session-local view. Tool definitions are shared, while deferred MCP activation is session-local.
 
-The Ness CLI keeps one `CodingSession` runtime per live thread. `/new` and `/threads` may therefore leave one turn running while another thread becomes selected. A `/config` model/provider/reasoning change rebuilds the selected runtime and updates agent defaults for future runtimes; already-live sibling threads remain pinned.
+Thread persistence views share the database and its write lock. Each view owns
+its autosave flag, so changing one thread cannot change a sibling's event,
+compaction, checkpoint, or subagent persistence. The CLI repository wraps the
+same view used by the session's SDK graph and tools.
+
+The Ness CLI opens one shared runtime with `open_interactive_runtime` or `open_headless_runtime`. Its session factory keeps one `CodingSession` per live thread, wrapping a session-owned SDK configuration accessible through `Session.config`. `/new` and `/threads` can leave one turn running while another thread becomes selected. A `/config` model/provider/reasoning change reloads the selected session's models; future sessions use the current configuration, while already-live sibling threads remain pinned. The runtime closes its sessions, MCP manager, and providers on exit.
 
 ### MCP boundary
 
 The SDK's `MCPRuntime` accepts fully resolved stdio or HTTP server specifications and owns connections, session lifecycle, tool discovery, LangChain tool conversion, calls, and structured connection state. It has no project-file, terminal, trust, or credential-storage policy, so it can be embedded in domain-specific or domain-agnostic applications.
 
 The Ness adapter owns `.ness/mcp.json`, Cursor/Claude compatibility, environment interpolation, trust fingerprints, OAuth credential persistence, and CLI presentation. It converts project entries into resolved SDK `MCPServerSpec` values before starting the runtime.
+
+The adapter shares project server and OAuth schema checks between import and
+runtime loading in `ness_cli.mcp.schema`. Import validation retains unresolved
+environment placeholders; runtime loading expands them and then validates the
+resolved HTTP URL. Null optional `env` and `headers` maps mean empty maps. An
+explicit OAuth token authentication method must be one of the supported strings.
+The public `ness_agent.mcp` redaction helpers mask diagnostic URLs and literal
+secrets for both layers without depending on CLI policy.
+
+`ProjectMCPConfig` and `ProjectMCPManager` resolve their project root once at
+construction. An omitted or `None` root uses the current working directory;
+an explicit root takes precedence. The resolved root stays bound to that
+instance for workspace interpolation and relative server paths. The CLI
+runtime passes its resolved project root explicitly.
 
 ---
 
@@ -43,7 +70,7 @@ Ness Agent splits context into four layers to keep prompt caching stable:
 3. **L2 project context**: app-supplied domain/repo structure (`PromptLayersConfig.l2_context`); not auto-loaded by bare `Session`.
 4. **L3 working state** (`CodingOverlay` / `render_overlay_delta`): wrapped in `<system-reminder>` tags and appended as an internally tagged tail `HumanMessage`. L3 is retained only in checkpointed model context so later requests preserve the exact wire prefix; it is excluded from the semantic transcript, reflection, and durable CLI events. Fresh user turns receive the full overlay and tool loops receive section deltas. After compaction all historical L3 messages are discarded and one current full overlay is injected. Includes git branch/dirty state, compaction status, todos, session memory, skill hints, and plan/act instructions.
 
-The L1 skill catalog lists every available skill with its path; full skill bodies enter the conversation when the model calls `skill_view` (or `read`s the path). `/skill <name>` stages a one-shot L3 hint for the next turn — it does not inject the body itself (see [Skills in the CLI guide](cli.md#skills)).
+The CLI sends the available skill catalog through L3 on the first turn, after availability changes, and after compaction. Full skill bodies enter the conversation when the model calls `skill_view` or reads the path. Selecting a skill with `$` adds an L3 hint to that prompt (see [Skills in the CLI guide](cli.md#skills)).
 
 ---
 

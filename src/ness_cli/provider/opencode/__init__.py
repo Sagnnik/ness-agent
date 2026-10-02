@@ -1,1 +1,0 @@
-"""OpenCode Go provider implementation."""

@@ -6,7 +6,8 @@ from langchain_core.tools import BaseTool
 
 from ness_agent.tools.ask import question
 from ness_agent.tools.discover import add_tools, search_tools
-from ness_agent.tools.fs import delete, edit, glob, is_git_repo, read, write
+from ness_agent.tools.fs import delete, edit, glob, read, write
+from ness_agent.tools.fs import is_git_repo as is_git_repo
 from ness_agent.tools.search import grep
 from ness_agent.tools.shell import shell as shell_tool
 from ness_agent.tools.skill import skill_view

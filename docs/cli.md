@@ -22,7 +22,7 @@ ness
 /init
 ```
 
-`/init` creates project `.ness/` (dirs, permissions, hooks, mcp, default agent profiles, empty `NESS.md`) and ensures global config (`USER.md`, `instructions/`, `plans/<slug>/`).
+`/init` creates project `.ness/` directories for agents, commands, threads, and runtime data, plus permissions, hooks, MCP configuration, default agent profiles, and an empty `NESS.md`. It also ensures global config (`USER.md`, `instructions/`, `plans/<slug>/`). Skill directories are discovered when present and are not created by `/init`.
 
 Or skip the env var and run `/login`. Choose Codex to sign in with ChatGPT
 using managed browser/device authentication, or OpenRouter/OpenCode Go for a masked API-key prompt. Device-code
@@ -67,23 +67,25 @@ ness
 ness --worktree auth
 ```
 
-Each worktree gets its own branch (`worktree-<name>`), file edits, and runtime data (`.ness/threads/`, `.ness/runtime/sessions`, shell jobs). Tracked `.ness` files (agents, skills, permissions, NESS.md) inherit from git. Config and secrets are global (see [Configuration](configuration.md)), so worktrees need no per-checkout setup. Re-launching with the same `--worktree` name reuses the existing checkout. Merge back with normal git when done (`git merge worktree-auth`, etc.).
+Each worktree gets its own branch (`worktree-<name>`), file edits, and runtime data (`.ness/threads/`, `.ness/runtime/sessions`, shell jobs). Tracked `.ness` files (agents, permissions, NESS.md) and project skills under `.agents/skills/` inherit from git. Config and secrets are global (see [Configuration](configuration.md)), so worktrees need no per-checkout setup. Re-launching with the same `--worktree` name reuses the existing checkout. Merge back with normal git when done (`git merge worktree-auth`, etc.).
 
 ---
 
 ## Skills
 
-Primary project skills live under `.ness/skills/<name>/SKILL.md`. Ness also discovers skills from common agent directories when present:
+Primary project skills live under `.agents/skills/<name>/SKILL.md`. Ness discovers these shared and compatibility locations when present:
 
 **Project-local:** `.agents/skills/`, `.claude/skills/`, `.codex/skills/`, `.cursor/skills/`  
-**User-global:** `~/.agents/skills/` only
+**User-global:** `~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.cursor/skills/`
 
-This discovery is a Ness CLI policy — the CLI passes these roots to the SDK explicitly. The SDK itself scans only the directories it is given; embedders opt into the well-known roots via `merge_skill_dirs()` (see [SDK guide → Skills](sdk.md#skills)).
+This discovery is a Ness CLI policy. The CLI passes these roots to the SDK explicitly. The SDK scans only the directories it is given; embedders opt into these roots via `default_skill_search_dirs()` or add a custom root with `merge_skill_dirs()` (see [SDK guide → Skills](sdk.md#skills)).
 
-`.ness/skills` wins on name collisions; then other project roots; then global. Nested category layouts (`category/skill/SKILL.md`) are supported. A directory with `SKILL.md` is a skill (resources like `scripts/` are not scanned as skills).
+Project roots take precedence over user-global roots. Within each scope, `.agents/skills` wins on name collisions, followed by `.claude/skills`, `.codex/skills`, and `.cursor/skills`. Nested category layouts (`category/skill/SKILL.md`) are supported. A directory with `SKILL.md` is a skill (resources like `scripts/` are not scanned as skills).
+
+The CLI does not discover `.ness/skills` or migrate its contents. Create skill directories yourself or use a skill installer. Directory symlinks are supported, and links to the same skill are deduplicated; Ness does not create or manage those links.
 
 ```text
-.ness/skills/react_component/SKILL.md
+.agents/skills/react_component/SKILL.md
 .agents/skills/product-a/skill-one/SKILL.md
 ```
 
@@ -99,7 +101,15 @@ description: Create React components matching project conventions.
 Skill instructions go here.
 ```
 
-Skill loading is two-stage. A one-line catalog of every available skill (`name: description`, plus path) is always present in L1. Full `SKILL.md` bodies load when the model calls the `skill_view` tool (or `read`s the catalog path); that content stays in the conversation as a tool message. `/skill <name>` stages a one-shot L3 `skill_request` hint for the next user turn. Successfully viewed skills accumulate in L3 as a `loaded_skills` summary (metadata only — the body remains in tool history).
+Skill loading is two-stage. A one-line catalog of available skills (`name: description`, plus path) is sent through L3 on the first turn, after availability changes, and after compaction. Full `SKILL.md` bodies load when the model calls the `skill_view` tool (or `read`s the catalog path); that content stays in the conversation as a tool message. There is no separate loaded-skill summary. After compaction, a general reminder tells the model to reload instructions for any skill procedure it needs.
+
+Type `$` at the start of a word to open the skill list in the input chrome. Keep typing to filter, use Up/Down to highlight a skill, and press Tab to insert `$<name>` and request it for that prompt. Enter sends the prompt; Esc closes the list. Without a selection, `$` stays ordinary text, even if you type a matching skill name. Removing a selected marker removes its request. Selections stay with their prompt when queued.
+
+Skill availability defaults and thread snapshots are saved in the global
+configuration directory's `skill-state.json`. Ness skips malformed saved skill
+entries and rebuilds a requested thread's snapshot if its skill-list container
+is invalid. Damaged records in other threads cannot block opening your thread.
+Older snapshots migrate automatically while valid thread selections stay intact.
 
 ---
 
@@ -242,6 +252,8 @@ Batch mode validates every task before starting any of them and returns one stru
 
 Shift+Tab toggles plan/act mode without rebuilding the graph or invalidating the prompt cache. Current mode appears in the prompt prefix and footer. Type `/` for the command picker or `/help` for the full list.
 
+An error stops the current prompt queue and leaves unstarted prompts queued for review. An interruption also stops queue processing; explicitly cancelling clears the queue. Warnings do not stop the queue. A later final response does not clear an earlier error; headless mode uses the same rule when choosing its exit code.
+
 **General**
 
 - `/help`: show the command reference.
@@ -255,16 +267,23 @@ Shift+Tab toggles plan/act mode without rebuilding the graph or invalidating the
 - `/threads`: open a scrollable saved-thread picker, ordered by recent updates and prefixed with local `YYYY-MM-DD HH:mm` timestamps. Threads with active turns show an animated working indicator; switching away does not interrupt them.
 - `/rename <name>`: set or update the current session's persistent display name (1–80 characters; requires thread autosave).
 - `/fork`: choose a human message, copy the conversation state before it into a child thread, and prefill that message for editing. Forking copies session memory/checkpoints but leaves current working-tree files unchanged.
-- `/goal <objective>`: run up to three worker attempts, each followed by an isolated read-only judge. Failed verdicts become repair instructions for the next attempt.
+- `/goal <objective>`: run up to `GOAL_MAX_ATTEMPTS` worker attempts, defaulting to three. Only completed attempts reach validation and the isolated read-only judge. Unmet validation or verdicts produce repair instructions for the next attempt. A worker error or interruption stops the goal immediately, records the reason in goal history, and skips judging and automatic retries.
 - `/save`: archive the current thread with a headline summary.
 - `/new`: archive and start a fresh thread. During an active turn, the running thread stays in the background and the new thread starts independently.
 - `/compact`: request a cache-safe summary at the next model boundary; the active user/tool turn remains verbatim unless it exceeds the retained-suffix budget, in which case older in-turn work is summarized and a coherent recent suffix is kept.
 - `/reflection`: immediately reflect on conversation messages added since the last successful reflection and update session memory.
 - `/export <path.html>`: write the current durable session as a self-contained, interactive HTML transcript. The export retains events from before compactions, includes an in-page normalized JSONL download, omits pasted image bytes, and refuses to overwrite an existing file. Quote paths that contain spaces.
 
+When an API response omits its cost, Ness estimates it from the provider's
+model metadata. Rates refresh when main, reflection, or goal-judge models are
+created and when the model catalog is loaded or refreshed. Existing sessions
+share those rates; previously recorded costs and token totals stay unchanged.
+Provider-reported costs take precedence, and subscription calls do not receive
+API cost estimates.
+
 **Context & memory**
 
-- `/skill [<name>]`: list skills, or stage a skill for the next message (model loads via `skill_view`).
+- `/skill`: inspect skills and manage availability. Select a skill for a prompt by typing `$` and pressing Tab in the skill list. The model loads its instructions through `skill_view`.
 - `/init`: initialize project `.ness/` and ensure global config.
 - `/memory` or `/memory add <note>`: read or append project memory.
 - `/memory create [force]`: opt-in LLM draft of `NESS.md` from project context (`force` overwrites non-empty content).
@@ -280,14 +299,23 @@ Shift+Tab toggles plan/act mode without rebuilding the graph or invalidating the
 
 - `/clear`: clear the visible transcript without resetting the conversation.
 - `/copy`, `/copy code`, `/copy <n>`: copy assistant output.
-- `Ctrl+G`: paste an image from the clipboard into the prompt as `[Image #N]`. The image is resized (max 2000px long edge, max 5 MB) and sent to vision-capable models.
-- `@path/to/file`: attach a file's contents to the next prompt — its current contents are inlined as a `<document>` block above your text. Type `@` to see suggestions from the repo's tracked paths; ↑/↓ to pick, Enter or Tab to complete, Esc to dismiss. Mention tokens persist on resume/rollback and re-expand from disk.
+- `Ctrl+G`: paste an image from the clipboard into the prompt as `[Image #N]`. The image is resized (max 2000px long edge, max 5 MB) and sent to vision-capable models. If the system clipboard supplies copied filenames, Ness uses the first readable image file and skips non-image or unreadable files.
+- `@path/to/file`: attach a file's contents to the next prompt — its current contents are inlined as a `<document>` block above your text. Type `@` to see tracked paths and untracked, non-ignored project files; ↑/↓ to pick, Enter or Tab to complete, Esc to dismiss. Suggestions use a 30-second cached file index. Mention tokens persist on resume/rollback and re-expand from disk.
+
+Pasted images also create PNG scratch files under the project's configured
+cache directory. These files remain until you delete them manually. See
+[cache locations and cleanup](configuration.md#directory-layout).
 
 Markdown files under `.ness/commands/*.md` become project-local slash commands. Their body is used as a prompt template with `{{args}}` substitution.
 
 ---
 
 ## Thread events
+
+Autosave is per open thread. A `/config` change applies to the selected thread
+and becomes the default for new threads. Other open threads keep their setting.
+Turning autosave off preserves existing history but skips new saves; enabling
+it again does not backfill unsaved turns.
 
 When autosave is on, Ness Agent stores events in `.ness/threads/threads.db`:
 
@@ -315,5 +343,11 @@ Selecting an idle saved thread rebuilds user messages, assistant tool-call turns
 When a thread contains a successful new-format `compaction_llm` checkpoint, resume starts from its summary and replays only raw events after `source_event_seq`. Raw conversation events remain available for audit, rollback, and forks; L3 reminder messages are never written to the event log.
 
 Idle threads are archived on `/save`, `/new`, thread switching/forking, and session exit. Switching or using `/new` during an active turn leaves that live thread unarchived until it finishes. Archived threads get a headline summary from the first user message.
+
+`/rollback [seq]` returns to the checkpoint before the selected user turn. It restores recorded file changes, removes files created by the discarded work, and preserves your Git staging choices and unrelated files. Without a sequence number, it opens the turn picker. Automatic rollback requires autosave and a Git checkpoint from a repository with an initial commit.
+
+Rollback checks the recorded files before restoring them. Later changes to those files, overlapping tool operations, incomplete mutation records, background shell starts, and older mutating checkpoints without ownership records cause a failure instead of an automatic restore. Git-ignored files are outside shell snapshot coverage. File changes observed during a foreground tool's execution window are attributed to that tool; external writers during that window cannot be distinguished from the command itself. Managed mutations are blocked during restoration, so use automatic rollback without concurrent external writers.
+
+History is discarded only after file restoration, memory restoration, and conversation replay succeed. On failure, history and checkpoints remain available for retry. An I/O or replay failure can leave files, memory, or live graph state partially restored; fix the reported cause and retry, or resume the thread from its retained history.
 
 > **Breaking database change:** the current release does not migrate older thread databases. If `.ness/threads/threads.db` predates persistent session names, Ness stops with an incompatibility error. Back up or remove that file so Ness can create the current schema; removing it discards saved threads.

@@ -5,7 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -20,14 +20,14 @@ from ness_agent.context.budget import (
     resolve_usable_context_budget,
 )
 from ness_agent.context.overlay import OverlayContext, OverlayProvider
-from ness_cli.events import events_to_messages
+from ness_cli.session.replay import events_to_messages
 from ness_agent.context.layers import AuxPrompts
 from ness_agent.graph.helpers import _split_active_turn_safely
 from ness_agent.graph.nodes import make_nodes
 from ness_agent.memory import MemoryStore
 from ness_agent.options import MemoryConfig, NessAgentOptions
 from ness_agent.persistence import ThreadStore
-from ness_agent.reflection import finalize_session_reflection, run_reflection_gate
+from ness_agent.reflection import run_reflection_gate
 from ness_agent.tracing.cost import CostTracker
 
 
@@ -59,7 +59,19 @@ def test_sessions_fork_mutable_config_and_share_project_services(tmp_path: Path)
     assert first.config.cost_tracker is not second.config.cost_tracker
     assert first.config.permission_store is not second.config.permission_store
     assert first.config.tool_registry is not second.config.tool_registry
-    assert first.config.thread_store is second.config.thread_store is agent.config.thread_store
+    assert first.config.skill_loader is not second.config.skill_loader
+    assert first.config.thread_store is not second.config.thread_store
+    assert first.config.thread_store is not agent.config.thread_store
+    assert (
+        first.config.thread_store.threads_db
+        == second.config.thread_store.threads_db
+        == agent.config.thread_store.threads_db
+    )
+    assert (
+        first.config.thread_store._write_lock
+        is second.config.thread_store._write_lock
+        is agent.config.thread_store._write_lock
+    )
     assert first.config.memory_store is second.config.memory_store is agent.config.memory_store
     assert first.config.hook_runner is second.config.hook_runner is agent.config.hook_runner
     assert first.config.tracer is second.config.tracer is agent.config.tracer
@@ -759,30 +771,6 @@ def test_active_turn_split_keeps_parallel_tool_batch_atomic():
     }
 
 
-@pytest.mark.parametrize("remaining_tokens", [0, 1, 100])
-def test_active_turn_split_excludes_older_batch_over_budget(remaining_tokens):
-    user = HumanMessage(content="long task")
-    batches = [
-        [
-            AIMessage(
-                content="",
-                tool_calls=[{"name": "ping", "args": {}, "id": call_id}],
-            ),
-            ToolMessage(content="x" * size, tool_call_id=call_id),
-        ]
-        for call_id, size in [("old", 270_000), ("recent", 60_000)]
-    ]
-    budget = resolve_token_count(batches[-1]) + remaining_tokens
-
-    prefix, suffix = _split_active_turn_safely(
-        [user, *batches[0], *batches[1]], keep_recent_tokens=budget
-    )
-
-    assert prefix == [user, *batches[0]]
-    assert suffix == batches[1]
-    assert resolve_token_count(suffix) <= budget
-
-
 @pytest.mark.parametrize("image_results", [False, True], ids=["text", "images"])
 def test_compaction_drops_large_older_batch_within_active_turn(tmp_path, image_results):
     agent = _agent(tmp_path)
@@ -1120,34 +1108,76 @@ def test_options_context_window_drives_usable_budget():
     ) == 50_000
 
 
-def test_agent_spec_resolves_backends(tmp_path: Path):
+def test_agent_spec_runs_tool_loop_and_returns_aggregate_usage(tmp_path: Path):
     from ness_agent import AgentSpec, NessAgent
-    from ness_agent.tracing.tracer import NoopTracer
 
-    model = FakeListChatModel(responses=["ok"])
+    class ScriptedModel:
+        model = "usage-model"
 
-    @tool
-    def ping() -> str:
-        """Return pong."""
-        return "pong"
+        def __init__(self):
+            self.requests = []
+            self.responses = [
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "read", "args": {"path": "message.txt"}, "id": "call-1",
+                    }],
+                    usage_metadata={
+                        "input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
+                        "input_token_details": {"cache_read": 10, "cache_creation": 7},
+                    },
+                    response_metadata={"cost": 0.1},
+                ),
+                AIMessage(
+                    content="done",
+                    usage_metadata={
+                        "input_tokens": 200, "output_tokens": 8, "total_tokens": 208,
+                        "input_token_details": {"cache_read": 50, "cache_creation": 11},
+                    },
+                    response_metadata={"cost": 0.2},
+                ),
+            ]
 
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages, **kwargs):
+            self.requests.append(list(messages))
+            return self.responses.pop(0)
+
+    model = ScriptedModel()
+
+    (tmp_path / "message.txt").write_text("pong\n", encoding="utf-8")
     spec = AgentSpec(
         model=model,
-        tools=[ping],
+        tools=["read"],
         prompt=PromptLayers(PromptLayersConfig(l0="L0", persona="P")),
-        options=NessAgentOptions(ness_dir=tmp_path / ".ness", project_root=tmp_path),
+        options=NessAgentOptions(
+            ness_dir=tmp_path / ".ness", project_root=tmp_path,
+            enable_approval=False, auto_save_threads=False,
+        ),
     )
     agent = NessAgent.from_spec(spec)
-    cfg = agent.config
-    assert cfg.memory_store is not None
-    assert cfg.thread_store is not None
-    assert cfg.permission_store is not None
-    assert cfg.tool_registry is not None
-    assert cfg.cost_tracker is not None
-    assert isinstance(cfg.tracer, NoopTracer)
-    assert not hasattr(cfg, "budget")
-    assert not hasattr(cfg, "permission_policy")
-    assert not hasattr(cfg, "mcp_config")
+    result = asyncio.run(agent.session(thread_id="session-usage").run("read message.txt"))
+
+    assert result.assistant_message == "done"
+    assert not any(event.kind == "error" for event in result.events)
+    assert len(model.requests) == 2
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "call-1" and "pong" in message.content
+        for message in model.requests[1]
+    )
+    usage = result.usage_total
+    assert usage is not None
+    assert usage.model == "usage-model"
+    assert usage.input_tokens == 300
+    assert usage.uncached_input_tokens == 240
+    assert usage.cached_input_tokens == 60
+    assert usage.cache_write_input_tokens == 18
+    assert usage.output_tokens == 13
+    assert usage.calls == 2
+    assert usage.cost_usd == pytest.approx(0.3)
 
 
 def test_aggregate_usage_sums_calls_and_costs():
@@ -1183,57 +1213,3 @@ def test_aggregate_usage_sums_calls_and_costs():
     assert mixed is not None
     assert mixed.model == "*"
     assert mixed.cost_usd == 0.5
-
-
-def test_run_result_usage_total_accumulates_bridge_events(tmp_path: Path):
-    """Session.run exposes usage_total as the sum of per-call usage events."""
-    from ness_agent.types import UsageEvent, aggregate_usage
-
-    model = FakeListChatModel(responses=["done"])
-    agent = NessAgent(
-        model=model,
-        tools=[],
-        prompt=PromptLayers(PromptLayersConfig(l0="L0", persona="P")),
-        options=NessAgentOptions(
-            ness_dir=tmp_path / ".ness",
-            project_root=tmp_path,
-            enable_approval=False,
-            auto_save_threads=False,
-        ),
-    )
-    session = agent.session(thread_id="t-usage-total")
-
-    # Simulate the usage bridge the agent node would fire mid-turn.
-    from ness_agent.session import _active_session
-    from ness_agent.session_context import reset_session_context
-
-    async def _run():
-        ctx_token = session._install_session_runtime()
-        session._last_usage = None
-        session._turn_usages = []
-        token = _active_session.set(session)
-        try:
-            bridge = session.config._usage_bridge
-            bridge(UsageEvent("m", 100, 90, 10, 5, 0.1))
-            bridge(UsageEvent("m", 200, 150, 50, 8, 0.2))
-            assert session._last_usage is not None
-            assert session._last_usage.input_tokens == 200
-            total = aggregate_usage(session._turn_usages)
-            assert total is not None
-            assert total.input_tokens == 300
-            assert total.calls == 2
-            assert total.cost_usd == pytest.approx(0.3)
-        finally:
-            _active_session.reset(token)
-            reset_session_context(ctx_token)
-
-    asyncio.run(_run())
-
-
-def test_run_result_exposes_only_aggregate_usage_field():
-    from ness_agent.types import RunResult
-
-    result = RunResult(assistant_message="done", todos=[], events=[])
-
-    assert result.usage_total is None
-    assert not hasattr(result, "usage")

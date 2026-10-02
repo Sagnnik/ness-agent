@@ -3,7 +3,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, message_to_dict
 
 from ness_agent.persistence import ThreadStore
-from ness_cli.events import events_to_messages
+from ness_cli.session.replay import events_to_messages
 
 
 def _seed_summary_boundary(store: ThreadStore, thread_id: str) -> tuple[int, int]:

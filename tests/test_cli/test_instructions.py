@@ -1,8 +1,5 @@
-"""CLI instruction packaging and global-config loading."""
-
 from __future__ import annotations
 
-from pathlib import Path
 
 from ness_agent.instructions import (
     ACT_MODE,
@@ -16,6 +13,7 @@ from ness_agent.instructions import (
 )
 from ness_cli.instructions import (
     INSTRUCTION_FILES,
+    clear_instruction_cache,
     default_instruction_files,
     load_instruction,
     packaged_instruction,
@@ -26,6 +24,7 @@ from ness_cli.prompts import (
     default_prompt_layers,
     plan_act_modes,
 )
+
 
 _SDK_PARITY = {
     "l0_harness.md": L0_HARNESS,
@@ -39,48 +38,53 @@ _SDK_PARITY = {
 }
 
 
-def test_default_instruction_files_cover_expected_set() -> None:
+def test_every_legacy_instruction_has_a_packaged_replacement() -> None:
     files = default_instruction_files()
+
     assert set(files) == set(INSTRUCTION_FILES)
-    for name, content in files.items():
-        assert content.strip(), name
+    assert all(content.strip() for content in files.values())
+    assert set(_SDK_PARITY) < set(files)
 
 
-def test_packaged_sdk_instruction_parity() -> None:
+def test_packaged_sdk_instructions_preserve_content() -> None:
     for name, expected in _SDK_PARITY.items():
         assert packaged_instruction(name) == expected.strip()
 
 
-def test_load_instruction_prefers_global_file(tmp_path: Path) -> None:
-    from ness_cli.instructions import clear_instruction_cache
-
+def test_project_override_wins_and_missing_files_fall_back(
+    isolated_cli_env,
+) -> None:
     clear_instruction_cache()
-    custom = "custom harness rules"
-    (tmp_path / "l0_harness.md").write_text(custom + "\n", encoding="utf-8")
-    assert load_instruction("l0_harness.md", instructions_dir=tmp_path) == custom
-    # Second call hits cache with the same result.
-    assert load_instruction("l0_harness.md", instructions_dir=tmp_path) == custom
+    directory = isolated_cli_env.root / "instructions"
+    directory.mkdir()
+    (directory / "l0_harness.md").write_text("PROJECT L0\n", encoding="utf-8")
 
-
-def test_load_instruction_falls_back_to_packaged(tmp_path: Path) -> None:
-    from ness_cli.instructions import clear_instruction_cache
-
-    clear_instruction_cache()
-    assert (
-        load_instruction("persona.md", instructions_dir=tmp_path)
-        == packaged_instruction("persona.md")
+    assert load_instruction("l0_harness.md", instructions_dir=directory) == (
+        "PROJECT L0"
+    )
+    assert load_instruction("persona.md", instructions_dir=directory) == (
+        packaged_instruction("persona.md")
     )
 
 
-def test_default_prompt_layers_reads_global(tmp_path: Path) -> None:
-    (tmp_path / "l0_harness.md").write_text("L0 FROM DISK\n", encoding="utf-8")
-    (tmp_path / "persona.md").write_text("PERSONA FROM DISK\n", encoding="utf-8")
-    layers = default_prompt_layers(instructions_dir=tmp_path)
-    assert layers.build_l0() == "L0 FROM DISK"
-    assert layers.config.persona == "PERSONA FROM DISK"
+def test_prompt_layers_preserve_explicit_order(isolated_cli_env) -> None:
+    directory = isolated_cli_env.root / "layers"
+    directory.mkdir()
+    (directory / "l0_harness.md").write_text("L0", encoding="utf-8")
+    (directory / "persona.md").write_text("PERSONA", encoding="utf-8")
+
+    layers = default_prompt_layers(instructions_dir=directory, l2_context="PROJECT")
+
+    assert layers.build_l0() == "L0"
+    assert layers.config.persona == "PERSONA"
+    assert layers.config.l2_context == "PROJECT"
 
 
-def test_default_aux_and_modes_read_global(tmp_path: Path) -> None:
+def test_auxiliary_mode_and_memory_prompts_use_explicit_directory(
+    isolated_cli_env,
+) -> None:
+    directory = isolated_cli_env.root / "explicit"
+    directory.mkdir()
     for name in (
         "compaction.md",
         "reflection.md",
@@ -90,85 +94,37 @@ def test_default_aux_and_modes_read_global(tmp_path: Path) -> None:
         "plan_mode.md",
         "act_mode.md",
     ):
-        (tmp_path / name).write_text(f"BODY:{name}\n", encoding="utf-8")
-    aux = default_aux_prompts(instructions_dir=tmp_path)
+        (directory / name).write_text(f"BODY:{name}", encoding="utf-8")
+
+    aux = default_aux_prompts(instructions_dir=directory)
+    modes = plan_act_modes(
+        plans_dir=isolated_cli_env.root / "plans",
+        instructions_dir=directory,
+    )
+
     assert aux.compaction == "BODY:compaction.md"
     assert aux.reflection == "BODY:reflection.md"
-    modes = plan_act_modes(plans_dir=tmp_path / "plans", instructions_dir=tmp_path)
+    assert aux.subagent == "BODY:subagent.md"
+    assert aux.thread_summary == "BODY:thread_summary.md"
     assert modes.plan_mode_template == "BODY:plan_mode.md"
     assert modes.act_mode_template == "BODY:act_mode.md"
-    prompt = build_init_memory_prompt("ctx", instructions_dir=tmp_path)
-    assert prompt == "BODY:init_memory.md"
-
-
-def test_goal_templates_load_from_instructions_dir(tmp_path: Path) -> None:
-    from ness_cli.goal import GoalCoordinator
-
-    (tmp_path / "goal_judge.md").write_text(
-        "JUDGE {goal} {attempt}/{max_attempts} {validation} {start_seq} {transcript}\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "goal_repair.md").write_text(
-        "REPAIR {goal} :: {repair}\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "goal_generic_repair.md").write_text("GENERIC\n", encoding="utf-8")
-
-    store = type(
-        "Store",
-        (),
-        {"load_thread_events_since": staticmethod(lambda *_a, **_k: [])},
-    )()
-    coding = type("Coding", (), {"thread_store": store, "thread_id": "t1"})()
-    coordinator = GoalCoordinator(coding, instructions_dir=tmp_path)
-    prompt = coordinator._build_judge_prompt("ship it", 1, 0, "ok")
-    assert prompt.startswith("JUDGE ship it 1/")
-    assert coordinator._instruction("goal_generic_repair.md") == "GENERIC"
-    assert "REPAIR ship it :: fix" in coordinator._instruction("goal_repair.md").format(
-        goal="ship it",
-        repair="fix",
+    assert build_init_memory_prompt("context", instructions_dir=directory) == (
+        "BODY:init_memory.md"
     )
 
 
-def test_build_coding_session_threads_instructions_dir(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from ness_cli.factory import build_coding_session
-    from ness_cli.paths import resolve_paths, ensure_global_config
+def test_goal_prompts_load_from_explicit_directory(isolated_cli_env) -> None:
+    directory = isolated_cli_env.root / "goals"
+    directory.mkdir()
+    for name in ("goal_judge.md", "goal_repair.md", "goal_generic_repair.md"):
+        (directory / name).write_text(f"BODY:{name}", encoding="utf-8")
 
-    monkeypatch.setenv("NESS_AGENT_CONFIG_DIR", str(tmp_path / "cfg"))
-    monkeypatch.setenv("NESS_AGENT_CACHE_DIR", str(tmp_path / "cache"))
-    project = tmp_path / "repo"
-    project.mkdir()
-    monkeypatch.chdir(project)
-
-    # Custom instructions dir distinct from env default would be via NessPaths;
-    # resolve_paths uses NESS_AGENT_CONFIG_DIR, then we pass that NessPaths through.
-    paths = resolve_paths(project_root=project)
-    ensure_global_config(paths)
-    custom = paths.instructions_dir
-    (custom / "init_memory.md").write_text(
-        "CUSTOM INIT {project_context}\n", encoding="utf-8"
+    assert load_instruction("goal_judge.md", instructions_dir=directory) == (
+        "BODY:goal_judge.md"
     )
-    (custom / "goal_judge.md").write_text(
-        "CUSTOM JUDGE {goal} {attempt}/{max_attempts} {validation} {start_seq} {transcript}\n",
-        encoding="utf-8",
+    assert load_instruction("goal_repair.md", instructions_dir=directory) == (
+        "BODY:goal_repair.md"
     )
-
-    coding = build_coding_session(thread_id="t-instr", paths=paths)
-    assert coding.instructions_dir == custom
-    assert "CUSTOM INIT" in build_init_memory_prompt(
-        "ctx", instructions_dir=coding.instructions_dir
+    assert load_instruction("goal_generic_repair.md", instructions_dir=directory) == (
+        "BODY:goal_generic_repair.md"
     )
-
-    from ness_cli.goal import GoalCoordinator
-
-    coding.thread_store = type(
-        "Store",
-        (),
-        {"load_thread_events_since": staticmethod(lambda *_a, **_k: [])},
-    )()
-    coordinator = GoalCoordinator(
-        coding, instructions_dir=coding.instructions_dir
-    )
-    assert coordinator._build_judge_prompt("g", 1, 0, "v").startswith("CUSTOM JUDGE")

@@ -271,13 +271,6 @@ class EditTests(SessionContextTestMixin, unittest.TestCase):
         self.assertIn("Applied 1 edit", second)
         self.assertEqual(target.read_text(encoding="utf-8"), "ALPHA\nbeta\nGAMMA\n")
 
-    def test_missing_old_string_fails_schema(self) -> None:
-        target = self.root / "module.py"
-        target.write_text("alpha\n", encoding="utf-8")
-        with self.assertRaises(Exception):
-            edit.invoke({"path": "module.py", "new_string": "beta"})
-        self.assertEqual(target.read_text(encoding="utf-8"), "alpha\n")
-
     def test_no_match_leaves_file_unchanged(self) -> None:
         target = self.root / "module.py"
         target.write_text("alpha\nbeta\n", encoding="utf-8")

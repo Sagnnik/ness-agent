@@ -1,5 +1,3 @@
-"""``ness --version`` wiring."""
-
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError
@@ -7,7 +5,7 @@ from importlib.metadata import version as dist_version
 
 from typer.testing import CliRunner
 
-from ness_cli.tui import main as tui_main
+from ness_cli import cli
 
 
 def _installed_version() -> str | None:
@@ -17,23 +15,24 @@ def _installed_version() -> str | None:
         return None
 
 
-def test_cli_version_flag_prints_version_and_exits():
-    result = CliRunner().invoke(tui_main.app, ["--version"])
+def test_version_prints_the_installed_version() -> None:
+    result = CliRunner().invoke(cli.app, ["--version"])
+
     assert result.exit_code == 0, result.output
     installed = _installed_version()
-    if installed is not None:
-        assert result.output.strip() == f"ness {installed}"
-    else:
+    if installed is None:
         assert "version unknown" in result.output
+    else:
+        assert result.output.strip() == f"ness {installed}"
 
 
-def test_cli_version_flag_is_eager(monkeypatch):
-    """--version short-circuits before any session/headless work runs."""
-    monkeypatch.setattr(
-        tui_main,
-        "run_headless",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")),
-    )
-    result = CliRunner().invoke(tui_main.app, ["--version", "-p", "hi"])
+def test_version_exits_before_runtime_construction(monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise AssertionError("runtime options must not be built")
+
+    monkeypatch.setattr(cli, "_build_overrides", fail)
+
+    result = CliRunner().invoke(cli.app, ["--version", "--print", "hello"])
+
     assert result.exit_code == 0, result.output
     assert result.output.startswith("ness ")

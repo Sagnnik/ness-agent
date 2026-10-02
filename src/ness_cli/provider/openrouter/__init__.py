@@ -1,1 +1,0 @@
-"""OpenRouter provider implementation."""

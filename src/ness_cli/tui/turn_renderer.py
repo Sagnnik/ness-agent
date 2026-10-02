@@ -1,187 +1,145 @@
-"""Per-turn SessionEvent -> render-facade mapping.
-
-One ``TurnRenderer`` per user turn. It consumes the
-:class:`~ness_agent.types.SessionEvent` stream produced by
-:meth:`ness_cli.CodingSession.run_turn` and drives the ``ness_cli.tui.render``
-facade, owning the per-turn render state that used to live in SessionApp's
-``astream_events`` dispatch:
-
-- the ``AssistantStream`` lifecycle (opened lazily on the first delta of
-  each LLM call, stopped + reasoning-finalised on ``assistant_final``),
-- tool call/result routing (todo refreshes, edit/write summary+diff, shell
-  output panels),
-- per-turn usage accumulation for the footer (the SDK emits one ``usage``
-  event per model call; the footer shows the turn total),
-- the ``interrupted`` rendering (partial reasoning drain + cancel banner).
-
-Durable persistence, plan autosave, cancel state cleanup, and context
-snapshots are NOT done here — the adapter/SDK own those. This module only
-renders.
-"""
+"""Pure adapter from SDK session events to a render sink."""
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from ness_agent.types import SessionEvent
+from ness_agent import SessionEvent
 
-from ness_cli.tui import render
-from ness_cli.tui.tool_display import extract_diff_section, extract_edit_summary
-
-#: Suffix appended to recorded assistant text when a turn is interrupted,
-#: mirroring the original CLI's convention for /copy.
-INTERRUPTED_SUFFIX = " … [interrupted]"
+from ness_cli.session.events import DurableEvent
+from ness_cli.tui.sink import RenderSink
 
 
-def render_persisted_tool_result(
-    name: str,
-    content: str,
-    *,
-    exit_status: str | None = None,
-) -> None:
-    """Route a tool result the same way live ``tool_end`` events do.
-
-    Used by :class:`TurnRenderer` and resume replay so edit diffs, shell
-    panels, and exit markers stay visually faithful.
-    """
-    if name == "todo":
-        render.render_tool_result(name, content, exit_status=exit_status)
-        return
-    if name in ("edit", "write"):
-        summary = extract_edit_summary(content)
-        if summary:
-            render.render_tool_result(name, summary, exit_status=exit_status)
-        diff = extract_diff_section(content)
-        if diff:
-            render.render_diff(diff, title=f"diff {name}")
-        return
-    if name == "shell":
-        # Non-ok exits (e.g. approval denial) must not use the success-looking
-        # shell panel — show the same [denied] / [error] tool-result line.
-        if exit_status and exit_status != "ok":
-            render.render_tool_result(name, content, exit_status=exit_status)
-        else:
-            render.render_shell_output(content)
-        return
-    if name == "spawn_subagent":
-        if exit_status and exit_status != "ok":
-            render.render_tool_result(name, content, exit_status=exit_status)
-        else:
-            render.render_subagent_output(content)
-        return
-    render.render_tool_result(name, content, exit_status=exit_status)
+def replay_event(sink: RenderSink, event: DurableEvent) -> None:
+    """Render durable history without converting it back to SDK messages."""
+    if event.kind == "user":
+        sink.user_message(str(event.get("content") or ""))
+    elif event.kind == "assistant":
+        sink.assistant_message(str(event.get("content") or ""))
+    elif event.kind == "reasoning":
+        sink.append_reasoning(
+            str(event.get("content") or ""),
+            elapsed=float(event.get("elapsed") or 0.0),
+        )
+    elif event.kind == "tool":
+        name = str(event.get("tool") or event.get("name") or "tool")
+        arguments = event.get("args")
+        if isinstance(arguments, dict):
+            sink.tool_call(name, arguments)
+        sink.tool_result(
+            name,
+            str(event.get("result") or event.get("content") or ""),
+            exit_status=str(event.get("exit") or "") or None,
+        )
+    elif event.kind == "usage":
+        sink.usage(event.as_dict())
+    elif event.kind in {"compact", "compaction_llm"}:
+        sink.notice("compaction", str(event.get("content") or ""))
+    elif event.kind == "reflection":
+        sink.notice("reflection", str(event.get("content") or ""))
 
 
 class TurnRenderer:
-    """Map one turn's SessionEvent stream onto the render facade."""
-
-    def __init__(self) -> None:
-        self._stream: render.AssistantStream | None = None
-        self._streamed_any = False
-        # Turn-total usage accumulator (one footer per turn, summed over the
-        # turn's model calls — matches the original cost-snapshot delta).
-        self.usage: dict[str, Any] = {}
-        # Completed assistant texts this turn, in order. TuiApp appends
-        # these to its assistant_history for /copy.
-        self.assistant_texts: list[str] = []
-        # Set when an ``interrupted`` event arrived (suppresses the normal
-        # footer/todos render at end of turn).
+    def __init__(self, sink: RenderSink) -> None:
+        self._sink = sink
+        self._assistant: object | None = None
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
+        self._reasoning_started: float | None = None
+        self._usage: dict[str, Any] = {}
         self.interrupted = False
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    @property
+    def usage(self) -> dict[str, Any]:
+        return dict(self._usage)
 
-    def feed(self, ev: SessionEvent) -> None:
-        kind = ev.kind
-        data = ev.data
-        if kind == "assistant_delta":
-            self._on_delta(data)
-        elif kind == "assistant_final":
-            self._on_final(data)
-        elif kind == "tool_start":
-            render.render_tool_calls(
-                [
-                    {
-                        "name": data.get("name"),
-                        "args": data.get("args") or {},
-                        "id": data.get("id"),
-                        "type": "tool_call",
-                    }
-                ]
+    def feed(self, event: SessionEvent) -> None:
+        data = event.data
+        if event.kind == "assistant_delta":
+            self._assistant_delta(data)
+        elif event.kind == "assistant_final":
+            self._assistant_final(data)
+        elif event.kind == "tool_start":
+            self._sink.tool_call(
+                str(data.get("name") or "tool"),
+                dict(data.get("args") or {}),
             )
-        elif kind == "tool_end":
-            self._on_tool_end(data)
-        elif kind == "usage":
+        elif event.kind == "tool_end":
+            status = data.get("exit") or data.get("exit_status")
+            self._sink.tool_result(
+                str(data.get("name") or "tool"),
+                str(data.get("content") or ""),
+                exit_status=str(status) if status else None,
+            )
+        elif event.kind == "usage":
             self._accumulate_usage(data)
-        elif kind == "compaction":
-            self._on_compaction(data)
-        elif kind == "warning":
-            render.render_warning(str(data.get("message") or data))
-        elif kind == "error":
-            render.render_error(str(data.get("message") or data))
-        elif kind == "interrupted":
-            self._on_interrupted(data)
-        # approval_required / question_required: the config handlers own the
-        # interactive UI; the events are informational only.
-        # plan_turn: the adapter owns plan autosave; nothing to render.
+        elif event.kind == "compaction":
+            self._compaction(data)
+        elif event.kind == "warning":
+            self._sink.warning(str(data.get("message") or data))
+        elif event.kind == "error":
+            self._sink.error(str(data.get("message") or data))
+        elif event.kind == "interrupted":
+            self._interrupted(data)
 
-    # ------------------------------------------------------------------
-    # Assistant stream lifecycle
-    # ------------------------------------------------------------------
+    def finish(self) -> None:
+        self._finalize_reasoning()
+        if self._assistant is not None:
+            text = "".join(self._text)
+            self._sink.assistant_final(self._assistant, text)
+            self._assistant = None
+        self._sink.finish_turn()
+        if self._usage and not self.interrupted:
+            self._sink.usage(self._usage)
 
-    def _on_delta(self, data: dict[str, Any]) -> None:
-        # A fresh stream per LLM call: the SDK emits deltas interleaved with
-        # tool execution, so an open stream means "this call still streaming".
-        if self._stream is None:
-            self._stream = render.AssistantStream()
-            self._streamed_any = False
+    def close(self) -> None:
+        """Release live render handles when a turn exits unexpectedly."""
+        self._finalize_reasoning()
+        self._sink.finish_turn()
+
+    def _assistant_delta(self, data: dict[str, Any]) -> None:
+        if self._assistant is None:
+            self._assistant = self._sink.start_assistant()
+            self._text = []
+            self._reasoning = []
+            self._reasoning_started = None
         reasoning = data.get("reasoning")
         if isinstance(reasoning, str) and reasoning:
-            self._stream.feed_reasoning(reasoning)
+            if self._reasoning_started is None:
+                self._reasoning_started = time.monotonic()
+            self._reasoning.append(reasoning)
         text = data.get("text")
         if isinstance(text, str) and text:
-            self._stream.feed(text)
-            self._streamed_any = True
+            self._text.append(text)
+            self._sink.assistant_delta(self._assistant, "".join(self._text))
 
-    def _on_final(self, data: dict[str, Any]) -> None:
-        self._stop_stream()
-        text = str(data.get("content") or "")
-        if not text.strip():
+    def _assistant_final(self, data: dict[str, Any]) -> None:
+        authoritative = str(data.get("content") or "")
+        if self._assistant is None:
+            if authoritative.strip():
+                self._sink.assistant_message(authoritative)
             return
-        self.assistant_texts.append(text.strip())
-        # Non-streaming models (or fully-suppressed streams) never produced
-        # deltas; render the final text as a panel so it isn't lost.
-        if not self._streamed_any:
-            render.render_assistant_panel(text)
+        self._finalize_reasoning()
+        text = authoritative if authoritative.strip() else "".join(self._text)
+        self._sink.assistant_final(self._assistant, text)
+        self._assistant = None
+        self._text = []
 
-    def _stop_stream(self) -> None:
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.finalize_reasoning()
-            self._stream = None
-
-    # ------------------------------------------------------------------
-    # Tools
-    # ------------------------------------------------------------------
-
-    def _on_tool_end(self, data: dict[str, Any]) -> None:
-        name = str(data.get("name") or "tool")
-        content = str(data.get("content") or "")
-        exit_status = data.get("exit") or data.get("exit_status")
-        render_persisted_tool_result(
-            name,
-            content,
-            exit_status=str(exit_status) if exit_status else None,
+    def _finalize_reasoning(self) -> None:
+        if self._assistant is None or not self._reasoning:
+            return
+        elapsed = time.monotonic() - (self._reasoning_started or time.monotonic())
+        self._sink.reasoning(
+            self._assistant,
+            "".join(self._reasoning),
+            elapsed=elapsed,
         )
-
-    # ------------------------------------------------------------------
-    # Usage / compaction
-    # ------------------------------------------------------------------
+        self._reasoning = []
+        self._reasoning_started = None
 
     def _accumulate_usage(self, data: dict[str, Any]) -> None:
-        acc = self.usage
-        acc["model"] = data.get("model") or acc.get("model")
+        self._usage["model"] = data.get("model") or self._usage.get("model")
         for key in (
             "input_tokens",
             "uncached_input_tokens",
@@ -189,44 +147,30 @@ class TurnRenderer:
             "cache_write_input_tokens",
             "output_tokens",
         ):
-            acc[key] = int(acc.get(key) or 0) + int(data.get(key) or 0)
-        cost = data.get("cost_usd")
-        if cost:
-            acc["cost_usd"] = float(acc.get("cost_usd") or 0.0) + float(cost)
+            self._usage[key] = int(self._usage.get(key) or 0) + int(data.get(key) or 0)
+        if data.get("cost_usd") is not None:
+            self._usage["cost_usd"] = float(self._usage.get("cost_usd") or 0.0) + float(
+                data["cost_usd"]
+            )
 
-    def _on_compaction(self, data: dict[str, Any]) -> None:
+    def _compaction(self, data: dict[str, Any]) -> None:
         info = str(data.get("info") or "").strip()
         if data.get("notice_reason") == "pre_act_hard_threshold":
-            render.render_notice(
-                info + " Hard threshold reached; compacting before execution.",
-                title="compaction",
-            )
-        elif info:
-            render.render_notice(info, title="compaction")
+            info = (
+                info + " Hard threshold reached; compacting before execution."
+            ).strip()
+        if info:
+            self._sink.notice("compaction", info)
 
-    # ------------------------------------------------------------------
-    # Interrupt
-    # ------------------------------------------------------------------
-
-    def _on_interrupted(self, data: dict[str, Any]) -> None:
+    def _interrupted(self, data: dict[str, Any]) -> None:
         self.interrupted = True
-        partial_reasoning: tuple[str | None, float] = (None, 0.0)
-        partial_text = ""
-        if self._stream is not None:
-            # Drain in-flight reasoning before stop() discards live state,
-            # mirroring the original cancel finalise order.
-            partial_reasoning = self._stream.reasoning_state()
-            partial_text = self._stream.text.strip()
-            self._stream.stop()
-            self._stream = None
-        # The SDK's partial_text is authoritative (hook-adjusted); fall back
-        # to what the live stream captured when it's empty.
-        partial_text = str(data.get("partial_text") or "").strip() or partial_text
-        if partial_reasoning[0]:
-            render.render_reasoning(
-                partial_reasoning[0] + INTERRUPTED_SUFFIX,
-                elapsed=partial_reasoning[1],
-            )
-        if partial_text:
-            self.assistant_texts.append(partial_text + INTERRUPTED_SUFFIX)
-        render.render_notice("Turn interrupted by user.", title="cancel")
+        partial = str(data.get("partial_text") or "").strip()
+        if not partial:
+            partial = "".join(self._text).strip()
+        self._finalize_reasoning()
+        if self._assistant is not None:
+            self._sink.interrupt_assistant(self._assistant, partial)
+            self._assistant = None
+        elif partial:
+            self._sink.assistant_message(partial + " … [interrupted]")
+        self._sink.notice("cancel", "Turn interrupted by user.")

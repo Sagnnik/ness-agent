@@ -40,11 +40,10 @@ class OverlayContext:
         Git branch + dirty-status summary (empty when not in a repo).
     ``git_available`` : bool or None
         Whether a git repo was detected at session start.
-    ``activate_skills`` : list[str]
+    ``requested_skills`` : list[str]
         Skill names requested this turn (one-shot, cleared after).
-    ``loaded_skills`` : list[dict]
-        Skills loaded via ``skill_view`` so far, each with ``name``,
-        ``description``, and ``path`` keys. Accumulates.
+    ``skill_catalog`` : str
+        Complete effective catalog when it must be injected this turn.
     """
 
     thread_id: str
@@ -57,8 +56,13 @@ class OverlayContext:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     git_snapshot: str = ""
     git_available: bool | None = None
-    activate_skills: list[str] = field(default_factory=list)
-    loaded_skills: list[dict[str, str]] = field(default_factory=list)
+    requested_skills: list[str] = field(default_factory=list)
+    skill_catalog: str = ""
+
+    @property
+    def activate_skills(self) -> list[str]:
+        """Compatibility name for requested_skills."""
+        return self.requested_skills
 
 class OverlayProvider(ABC):
     """Abstract base for building internal L3 sections injected each turn.

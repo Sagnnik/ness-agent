@@ -206,7 +206,7 @@ class Session:
         self._cfg = _config or agent.config.fork_for_session()
         self._force_compact = False
         self._pending_act_checkpoint = False
-        self._pending_skills: list[str] = []
+        self._requested_skills: list[str] = []
         self.turn_count = 0
         self.context_used = 0
         self.context_total = 0
@@ -218,6 +218,7 @@ class Session:
             self._cfg.checkpoint_factory() if self._cfg.checkpoint_factory else MemorySaver()
         )
         self._skill_loader = self._cfg.skill_loader
+        self._skill_catalog_pending = not self._cfg.prompts.config.include_skill_catalog
 
         _ensure_config_event_bridges(self._cfg)
 
@@ -271,7 +272,7 @@ class Session:
                 ness_dir=ness_dir,
                 project_root=project_root,
                 agent_config=cfg,
-                all_skills=self._skill_loader.load(),
+                available_skills=self._skill_loader.load(),
                 vision=self._vision,
             )
         )
@@ -393,17 +394,19 @@ class Session:
         """Set this session's persistent display name."""
         return self._cfg.thread_store.set_thread_name(self.thread_id, name)
 
-    def active_skills(self, names: Sequence[str]) -> None:
+    def requested_skills(self, names: Sequence[str]) -> None:
         """Replace the pending skill list for the next turn (replace-all)."""
-        self._pending_skills = list(names)
+        self._requested_skills = list(names)
+
+    active_skills = requested_skills  # Compatibility with existing SDK callers.
 
     def stage_skills(self, names: Sequence[str]) -> None:
         """Append skill names to the pending list.
 
-        Used by CLI ``/skill`` so multiple stages before one turn accumulate.
-        Consumed by :meth:`_build_run_payload` when ``active_skills=`` is omitted.
+        Multiple calls before one turn accumulate requests.
+        Consumed by :meth:`_build_run_payload` when ``requested_skills=`` is omitted.
         """
-        pending = list(self._pending_skills)
+        pending = list(self._requested_skills)
         seen = set(pending)
         for name in names:
             n = str(name).strip()
@@ -411,7 +414,36 @@ class Session:
                 continue
             pending.append(n)
             seen.add(n)
-        self._pending_skills = pending
+        self._requested_skills = pending
+
+    def configure_skills(
+        self,
+        skills: Sequence[dict[str, Any]],
+        *,
+        disabled_skill_ids: Sequence[str] = (),
+    ) -> None:
+        """Install a thread-owned skill snapshot and refresh its L3 catalog."""
+        self._skill_loader.set_snapshot(
+            skills,
+            disabled_skill_ids=disabled_skill_ids,
+        )
+        self.refresh_skill_catalog()
+
+    def set_skill_access(self, disabled_skill_ids: Sequence[str]) -> None:
+        """Update this thread's access map and refresh its L3 catalog."""
+        self._skill_loader.set_disabled_skills(disabled_skill_ids)
+        self.refresh_skill_catalog()
+
+    def refresh_skill_catalog(self) -> None:
+        """Send the complete current catalog through L3 on the next model call."""
+        if not self._cfg.prompts.config.include_skill_catalog:
+            self._skill_catalog_pending = True
+
+    def _consume_skill_catalog(self) -> str:
+        if not self._skill_catalog_pending:
+            return ""
+        self._skill_catalog_pending = False
+        return self._skill_loader.render_current_catalog()
 
     def request_compact(self) -> None:
         """Requests a compaction of the session."""
@@ -498,7 +530,6 @@ class Session:
         if not conversation:
             conversation = list(_effective_conversation(state.get("messages", []), state))
 
-        model_name = getattr(cfg.model, "model", "") or getattr(cfg.model, "model_name", "")
         compaction_note = ""
         if pressure is not None:
             compaction_note = pressure_note(
@@ -523,6 +554,7 @@ class Session:
         overlay_sections: dict[str, str] = {}
         overlay_provider = cfg.overlay
         if overlay_provider is not None:
+            available_skills = self._skill_loader.load()
             overlay_ctx = OverlayContext(
                 thread_id=self.thread_id,
                 mode=preview_mode,
@@ -536,8 +568,11 @@ class Session:
                 metadata=self.metadata,
                 git_snapshot=git_snapshot,
                 git_available=bool(git_flag),
-                activate_skills=list(self._pending_skills),
-                loaded_skills=list(state.get("loaded_skills", [])),
+                requested_skills=[name for name in self._requested_skills if name in available_skills],
+                skill_catalog=(
+                    self._skill_loader.render_current_catalog()
+                    if self._skill_catalog_pending else ""
+                ),
             )
             overlay_sections = {
                 name: text
@@ -609,13 +644,13 @@ class Session:
         tools_reg.sync()
         memory = cfg.memory_store
         skills_loader = cfg.skill_loader
-        all_skills = skills_loader.load()
+        available_skills = skills_loader.load()
         available = self.git_available is True if git_available is None else git_available
         return SystemMessage(content=cfg.prompts.build_stable_prefix(
             tools_reg.active_tools,
             user_memory=memory.load_user() if not memory.disabled else "",
             project_memory=memory.load_project() if not memory.disabled else "",
-            skill_catalog=skills_loader.render_catalog(all_skills),
+            skill_catalog=skills_loader.render_catalog(available_skills),
             git_available=available,
             metadata=self.metadata,
             tool_catalog_groups=[
@@ -705,7 +740,7 @@ class Session:
         self,
         user_message: HumanMessage,
         *,
-        active_skills: Sequence[str] | None,
+        requested_skills: Sequence[str] | None,
         mode_switch: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Build the turn payload and run config.
@@ -714,9 +749,9 @@ class Session:
         :meth:`_user_message`). Any pending bootstrap messages are prepended
         to the payload's ``messages`` and consumed once here.
         """
-        skills = list(active_skills if active_skills is not None else self._pending_skills)
-        if active_skills is None:
-            self._pending_skills = []
+        skills = list(requested_skills if requested_skills is not None else self._requested_skills)
+        if requested_skills is None:
+            self._requested_skills = []
         initial = list(self._pending_bootstrap)
         if initial:
             self._pending_bootstrap = []
@@ -725,7 +760,8 @@ class Session:
             "approval_declined": {},
             "mode": self.mode,
             "force_compact": self._consume_force_compact(),
-            "activate_skills": skills,
+            "requested_skills": skills,
+            "skill_catalog": self._consume_skill_catalog(),
             "mode_switch": mode_switch,
         }
         cfg = {"configurable": {"thread_id": self.thread_id}, "recursion_limit": self._cfg.options.recursion_limit}
@@ -910,7 +946,7 @@ class Session:
         message: str,
         *,
         images: Sequence[str] | None = None,
-        active_skills: Sequence[str] | None = None,
+        requested_skills: Sequence[str] | None = None,
         mode: str | None = None,
     ) -> AsyncIterator[tuple[SessionEvent, str]]:
         """Yield (event, assistant_text_so_far) pairs from the graph stream."""
@@ -966,7 +1002,7 @@ class Session:
                 try:
                     payload, cfg_payload = await self._build_run_payload(
                         user_message,
-                        active_skills=active_skills,
+                        requested_skills=requested_skills,
                         mode_switch=mode_switch,
                     )
                     cfg = cfg_payload
@@ -1072,6 +1108,7 @@ class Session:
         message: str,
         *,
         images: Sequence[str] | None = None,
+        requested_skills: Sequence[str] | None = None,
         active_skills: Sequence[str] | None = None,
         mode: str | None = None,
     ) -> RunResult:
@@ -1084,14 +1121,17 @@ class Session:
         Args:
             message: The user message text.
             images: Optional list of image URLs to attach.
-            active_skills: Skill names to activate this turn.
+            requested_skills: Skill names to request this turn.
+            active_skills: Compatibility spelling, used when requested_skills is omitted.
             mode: Override the session mode for this turn only.
         """
         events: list[SessionEvent] = []
         assistant_text = ""
         
         async for event, assistant_text in self._iter_events(
-            message, images=images, active_skills=active_skills, mode=mode
+            message, images=images,
+            requested_skills=requested_skills if requested_skills is not None else active_skills,
+            mode=mode,
         ):
             events.append(event)
         
@@ -1110,6 +1150,7 @@ class Session:
         message: str,
         *,
         images: Sequence[str] | None = None,
+        requested_skills: Sequence[str] | None = None,
         active_skills: Sequence[str] | None = None,
         mode: str | None = None,
     ) -> AsyncIterator[SessionEvent]:
@@ -1123,11 +1164,14 @@ class Session:
         Args:
             message: The user message text.
             images: Optional list of image URLs to attach.
-            active_skills: Skill names to activate this turn.
+            requested_skills: Skill names to request this turn.
+            active_skills: Compatibility spelling, used when requested_skills is omitted.
             mode: Override the session mode for this turn only.
         """
         async for event, _ in self._iter_events(
-            message, images=images, active_skills=active_skills, mode=mode
+            message, images=images,
+            requested_skills=requested_skills if requested_skills is not None else active_skills,
+            mode=mode,
         ):
             yield event
         self.turn_count += 1

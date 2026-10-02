@@ -21,7 +21,7 @@ class SessionContext:
     ness_dir: Path
     project_root: Path
     agent_config: NessAgentConfig | None = None
-    all_skills: dict[str, Any] | None = None
+    available_skills: dict[str, Any] | None = None
     vision: bool | None = None
 
 

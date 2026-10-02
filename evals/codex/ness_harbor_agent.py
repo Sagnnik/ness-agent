@@ -42,11 +42,13 @@ from harbor.models.trajectories import (
     Trajectory,
 )
 
+from .codex_chat_model import EVAL_NESS_VERSION
+
 
 class NessAgent(BaseInstalledAgent):
     SUPPORTS_ATIF: bool = True
     MODEL_CONNECTION = ModelConnectionSpec(passthrough=True)
-    NESS_VERSION: str = "0.2.4"
+    NESS_VERSION: str = EVAL_NESS_VERSION
     INSTRUCTION_PATH = EnvironmentPaths.agent_dir / "instruction.md"
     OUTPUT_PATH = EnvironmentPaths.agent_dir / "ness.txt"
     NESS_DIR = EnvironmentPaths.agent_dir / "ness"

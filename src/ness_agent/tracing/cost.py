@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ness_agent.tracing.config import PricingDict
@@ -57,8 +57,11 @@ def _provider_cost(metadata: dict[str, Any]) -> float | None:
 
 
 def _resolve_model_key(model_name: str, catalog: PricingDict) -> str | None:
-    name = model_name.lower()
-    return next((candidate for candidate in catalog if candidate in name), None)
+    name = model_name.casefold()
+    matches = [candidate for candidate in catalog if candidate.casefold() in name]
+    # Specific model rates must win over family prefixes regardless of which
+    # model was selected first. Full matches are also the longest matches.
+    return max(matches, key=len, default=None)
 
 def _model_cost_to_token_usage(model: str, mc: dict[str, int | float]) -> TokenUsage:
     input_tokens = int(mc["input_tokens"])
@@ -127,6 +130,7 @@ class CostTracker:
     2. ``estimate_cost`` callback when supplied.
     3. ``pricing`` dict (per-1M-token USD rates + cache-read ratio) when
        the model name matches a key as a case-insensitive substring.
+       The longest matching key wins, so specific rates override family rates.
 
     When neither path produces a value, ``cost_usd`` is ``None``.
     Per-model snapshots are available via :meth:`for_model`; :meth:`total`

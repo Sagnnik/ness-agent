@@ -69,6 +69,13 @@ than the base64 image payload.
 
 A `NessAgent` is a project-scoped runtime: it owns shared persistence, memory, hooks, skill and tool catalogs, tracing, pricing, and defaults. Each call to `agent.session(...)` creates a separate effective runtime with its own graph/checkpointer, model fields, copied options, temporary permission rules, active MCP set, cancellation state, and cost tracker.
 
+Each session also has its own `ThreadStore` view. These views share the same
+database and writer lock, while `auto_save` belongs to the view. New sessions
+initialize it from the agent's `options.auto_save_threads` default. Changing
+that default affects future sessions; existing sessions retain their policy.
+All SDK persistence writes, including compaction and subagent records, use
+the session's view. Disabling autosave leaves saved history readable.
+
 ```python
 agent = NessAgent(model=default_model, prompt=PromptLayersConfig())
 
@@ -162,17 +169,30 @@ Stable section names matter: the harness sends only changed L3 sections during a
 
 ## Coding adapter (optional)
 
-If you want the same wiring as the Ness CLI — OpenRouter models, `.ness/` paths, plan/act overlays, pricing — use the coding adapter:
+Applications should construct `NessAgent` and use its public `Session` API. The `ness_cli` runtime and session modules ship in the same distribution, but are internal CLI implementation APIs, without a compatibility guarantee for embedding. The following example shows the current wiring for CLI maintainers. It requires a configured provider and may start trusted project MCP servers.
 
 ```python
-from ness_cli.factory import build_coding_session
+import asyncio
+from pathlib import Path
 
-coding = build_coding_session(thread_id="session-abc123")
-async for event in coding.run_turn("add a rate limiter"):
-    ...
+from ness_cli.runtime import HeadlessOptions, open_headless_runtime
+
+
+async def main() -> None:
+    options = HeadlessOptions(project_root=Path.cwd())
+    # To resume instead, also set resume_thread_id="session-<saved-id>".
+    async with open_headless_runtime(options) as runtime:
+        coding = await runtime.session()
+        async for event in coding.run_turn("add a rate limiter"):
+            print(event.kind, event.data)
+
+
+asyncio.run(main())
 ```
 
-This module is included in the same `ness-agent` package; the CLI entry point is `ness`.
+The async context manager owns runtime cleanup. Interactive Ness uses `open_interactive_runtime`, then `initial_session`, `new_session`, or `resume_session`. To start a fresh thread, create a new session; the adapter has no `reset` method. The console entry point is `ness_cli.main:main`, exposed as `ness`.
+
+For an offline construction and resume example with no credentials, see the [SDK persistence recipe](../src/sdk_example_usage.md#sdk-persistence-recipe). That recipe explains the internal replay helper separately from the public SDK primitives.
 
 ---
 
@@ -201,7 +221,7 @@ Import smoke test: `tests/test_sdk_smoke.py`. Longer embedding examples: [src/sd
 
 ## Skills
 
-Skills are directories containing a `SKILL.md` (YAML frontmatter with `name` and `description`, plus the instruction body). Available skills appear as a one-line catalog in L1; the model loads full bodies on demand via the `skill_view` tool.
+Skills are directories containing a `SKILL.md` (YAML frontmatter with `name` and `description`, plus the instruction body). Available skills appear as a one-line catalog in L1 by default; the model loads full bodies on demand via the `skill_view` tool.
 
 The SDK scans **exactly** the roots you configure — it never adds directories implicitly:
 
@@ -213,16 +233,56 @@ To also load the well-known agent skill roots (`.agents/skills`, `.claude/skills
 
 ```python
 from pathlib import Path
-from ness_agent import NessAgent, merge_skill_dirs
+from ness_agent import NessAgent, default_skill_search_dirs
 
 agent = NessAgent(
     model=model,
     prompt=prompt,
-    skills_dirs=merge_skill_dirs(project_root, project_root / ".ness" / "skills"),
+    skills_dirs=default_skill_search_dirs(project_root),
 )
 ```
 
-`merge_skill_dirs(project_root, skills_dir)` returns your directory first, then the well-known project-local roots, then the user-global ones, deduped by resolved path (`default_skill_search_dirs(project_root)` returns just the well-known roots). Pass `project_rels=` / `global_rels=` to restrict which project-local and user-global roots are included (e.g. `global_rels=()` opts out of global roots entirely) — the Ness CLI uses `global_rels=(".agents/skills",)`, trusting only `~/.agents/skills` globally; your own application chooses whichever roots it trusts.
+`default_skill_search_dirs(project_root)` returns the well-known project-local roots, then the user-global ones, with `.agents/skills` first in each scope. The Ness CLI uses this list. `merge_skill_dirs(project_root, skills_dir)` puts an application-specific directory first, then those shared roots, deduped by resolved path. Pass `project_rels=` / `global_rels=` to restrict either set; `global_rels=()` excludes all user-global roots. Your application chooses its own roots.
+
+Skill defaults and their persistence belong to the application. Each new session has a fresh loader for the configured directories; snapshots and disabled IDs installed on `agent.config.skill_loader` are not inherited. Configure each session through the public methods, and reapply your choices when resuming:
+
+```python
+from ness_agent import SkillLoader
+
+records = SkillLoader(skills_dirs=my_skill_roots).discover()
+session = agent.session(thread_id=thread_id)
+session.configure_skills(records, disabled_skill_ids=my_disabled_ids)
+
+# Replace this session's disabled-ID set when the application's choices change.
+session.set_skill_access(updated_disabled_ids)
+```
+
+`discover()` returns logical records with IDs, bodies, and source paths, grouping exact bundle copies. `configure_skills()` freezes those records for that session. Without a snapshot, directories are rediscovered as context is built; IDs are content fingerprints and change when bundle files change. The application owns refresh and access policy. The built-in viewer requires local source directories, so an application fetching remote bundles should materialize their files locally before configuring the session.
+
+`session.stage_skills(names)` or `session.run(..., requested_skills=names)` requests that the model load available skills; it does not inject bodies directly. These requests are rendered by the overlay. With `include_skill_catalog=False`, the catalog also moves to the overlay, where it is sent on the first turn, after access changes, and after context rebuilds. Custom overlays must render `ctx.skill_catalog` and `ctx.requested_skills` to support that flow. `NoOverlay()` renders neither. Built-in subagents use an L1 catalog because they have no overlay.
+
+`session.requested_skills(names)` replaces requests staged for the next turn. The older `session.active_skills(names)` and `active_skills=` argument on `run()`/`stream()` remain compatibility aliases; an explicit `requested_skills=` takes precedence.
+
+Disabling a skill blocks future `skill_view` lookups and omits it from current requests. Viewed bodies stay in conversation history; there is no separate loaded-skill list. After compaction, the agent receives a general reminder to reload any skill instructions it needs. Other enabled file tools retain their own permissions.
+
+To exclude skill tools and instructions as well as discovery, use application-authored prompts, an explicit tool list without `skill_view`, and `NoOverlay()` or an application overlay without skill sections:
+
+```python
+from ness_agent import NessAgent, NoOverlay, PromptLayersConfig
+
+agent = NessAgent(
+    model=model,
+    prompt=PromptLayersConfig(
+        l0="Follow the application's instructions.",
+        persona="Application assistant.",
+        include_git_line=False,
+        include_skill_catalog=False,
+    ),
+    tools=[],
+    skills_dirs=[],
+    overlay=NoOverlay(),
+)
+```
 
 ## MCP in an SDK application
 
@@ -256,6 +316,8 @@ finally:
 ```
 
 The embedding application decides where server configuration comes from and how users approve or authenticate connections. `HTTPAuthFactory` can provide an `httpx` authentication object for each resolved HTTP spec.
+
+`ness_agent.mcp` also exposes shared helpers for diagnostic text. `redact_url(value)` strips URL credentials, query parameters, and fragments. `redact_text(value, secrets, fallback="[redacted]")` replaces literal secrets, longest first. A matching secret shorter than four characters replaces the whole message with the fallback. These helpers format text for display; callers still need to validate connection URLs and escape text for their output format. The SDK MCP runtime and CLI use these same helpers.
 
 For signatures and contracts for every public export in `ness_agent.__all__`, see the [SDK API reference](sdk-api.md).
 

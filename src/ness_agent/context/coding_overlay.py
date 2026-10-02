@@ -24,6 +24,7 @@ class CodingOverlay(OverlayProvider):
     Renders these sections in insertion order (empty sections are skipped by
     the renderer):
 
+    - ``skill_catalog`` — complete effective catalog when first sent or refreshed
     - ``skill_request`` — one-shot hint to load skills requested this turn
     - ``mode_switch`` — one-shot, on the first act turn after a plan->act toggle
     - ``plan_mode`` — plan-mode only; a ``<plan-mode>`` block with plan instructions
@@ -31,7 +32,6 @@ class CodingOverlay(OverlayProvider):
     - ``compaction`` — compaction status and pressure note
     - ``todos`` — only when there are non-completed items
     - ``session_memory`` — distilled episodic bullets for this thread
-    - ``loaded_skills`` — skills loaded via ``skill_view`` so far this session
     """
 
     def __init__(
@@ -56,8 +56,12 @@ class CodingOverlay(OverlayProvider):
 
         Rendered sections (in insertion order; empty ones are skipped):
 
+        ``skill_catalog``
+            Complete effective catalog on the first turn, after an access
+            change, and when model context is rebuilt.
+
         ``skill_request``
-            One-shot hint when ``ctx.activate_skills`` is non-empty.
+            One-shot hint when ``ctx.requested_skills`` is non-empty.
             Cleared after a single turn.
 
         ``mode_switch``
@@ -84,11 +88,6 @@ class CodingOverlay(OverlayProvider):
         ``session_memory``
             Episodic reflection bullets from ``ctx.session_memory``.
 
-        ``loaded_skills``
-            Skills loaded via ``skill_view`` accumulated in
-            ``ctx.loaded_skills``. After compaction on the same turn,
-            includes a reminder to call ``skill_view`` again for full bodies.
-
         Parameters
         ----------
         state : AgentState
@@ -104,7 +103,10 @@ class CodingOverlay(OverlayProvider):
         sections: dict[str, str] = {}
         mode = (ctx.mode or "act").lower()
 
-        req = list(ctx.activate_skills or [])
+        if ctx.skill_catalog.strip():
+            sections["skill_catalog"] = ctx.skill_catalog.strip()
+
+        req = list(ctx.requested_skills or [])
         if req:
             names = ", ".join(f'"{n}"' for n in req)
             sections["skill_request"] = (
@@ -133,21 +135,6 @@ class CodingOverlay(OverlayProvider):
 
         if ctx.session_memory.strip():
             sections["session_memory"] = "SESSION MEMORY\n" + ctx.session_memory.strip()
-
-        loaded = ctx.loaded_skills or []
-        if loaded:
-            lines = ["LOADED SKILLS"]
-            for s in loaded:
-                n = s.get("name", "")
-                d = s.get("description", "")
-                p = s.get("path", "")
-                lines.append(f"- {n}: {d}: {p}".rstrip(": "))
-            if bool((state.get("compaction_status") or {}).get("compacted")):
-                lines.append(
-                    "Skill bodies were compacted; call skill_view(name=<skill-name>) "
-                    "before following each loaded skill's procedure."
-                )
-            sections["loaded_skills"] = "\n".join(lines)
 
         return sections
 
