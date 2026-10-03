@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ness_agent.context.layers import PromptLayers
 from ness_agent.session_context import get_session_context
 
 DEFAULT_AGENT_TOOLS = ("read", "grep", "glob", "web_search", "fetch_url", "skill_view")
@@ -415,6 +416,8 @@ async def _invoke_subagent(
         child_cfg = replace(
             parent,
             model=model or parent.model,
+            # Child graphs have no overlay, so their skill catalog belongs in L1.
+            prompts=PromptLayers(replace(parent.prompts.config, include_skill_catalog=True)),
             tools=list(prepared.tools),
             tool_registry=ToolRegistry(prepared.tools),
             overlay=None,

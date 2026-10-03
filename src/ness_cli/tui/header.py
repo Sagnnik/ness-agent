@@ -5,9 +5,8 @@ rounded dashboard panel + hints) as a list of ``TranscriptLine`` rows
 that the prompt_toolkit transcript pane prints before the first prompt.
 
 The module is pure: every helper takes its inputs as arguments and returns
-``TranscriptLine`` rows, so it is fully testable without a live TUI. The live
-``TranscriptMixin.append_header`` (cli/transcript.py) is the only caller and
-computes ``project`` / ``addons_summary`` / ``version`` there.
+``TranscriptLine`` rows, so it is fully testable without a live TUI. The render
+sink supplies the project, integration summary, version, and current mode.
 """
 
 from __future__ import annotations
@@ -15,7 +14,8 @@ from __future__ import annotations
 import math
 from functools import lru_cache
 
-from ness_cli.tui.models import TranscriptLine
+from ness_cli.terminal import cell_width, clip_cells
+from ness_cli.tui.transcript.store import TranscriptLine
 from ness_cli.tui.theme import (
     CYAN,
     GRAY,
@@ -29,7 +29,7 @@ from ness_cli.tui.theme import (
 _SILVER_STOPS = (GRAY_DIM, GRAY, GRAY_BRIGHT, "#f0f2f5", GRAY_BRIGHT, GRAY, GRAY_DIM)
 _BRAND_TITLE_COLOR = "#e4e7ec"  # very light gray (a step down from near-white)
 _NODE_TOP_COLOR = "#6ee7b7"  # mint
-_NODE_BR_COLOR = "#c084fc" # dark purple
+_NODE_BR_COLOR = "#c084fc"  # dark purple
 _NODE_BL_COLOR = "#f97316"  # orange
 
 # --- braille (2x4 dot matrix) -----------------------------------------------
@@ -317,16 +317,24 @@ def _panel_rows(
         )
     )
     for left_label, left_val, right_label, right_val in row_specs:
-        left_str = f"{left_label} {left_val}"
-        right_str = f"{right_label} {right_val}"
-        if len(left_str) > left_half - inner_pad * 2:
-            left_str = left_str[: left_half - inner_pad * 2 - 1] + "…"
-        if len(right_str) > right_half - inner_pad * 2:
-            right_str = right_str[: right_half - inner_pad * 2 - 1] + "…"
+        left_str, left_fragments = _panel_cell(
+            left_label,
+            left_val,
+            width=max(0, left_half - inner_pad * 2),
+            key_style=key_style,
+            value_style=val_style,
+        )
+        right_str, right_fragments = _panel_cell(
+            right_label,
+            right_val,
+            width=max(0, right_half - inner_pad * 2),
+            key_style=key_style,
+            value_style=val_style,
+        )
 
         # build line: │ pad left pad │ pad right pad │
-        gap_left = " " * (left_half - len(left_str) - inner_pad)
-        gap_right = " " * (right_half - len(right_str) - inner_pad)
+        gap_left = " " * (left_half - cell_width(left_str) - inner_pad)
+        gap_right = " " * (right_half - cell_width(right_str) - inner_pad)
         text = (
             f"│{' ' * inner_pad}{left_str}{gap_left}"
             f"│{' ' * inner_pad}{right_str}{gap_right}│"
@@ -334,13 +342,11 @@ def _panel_rows(
         fragments: list[tuple[str, str]] = [
             (box_style, "│"),
             ("", " " * inner_pad),
-            (key_style, f"{left_label} "),
-            (val_style, left_val),
+            *left_fragments,
             ("", gap_left),
             (div_style, "│"),
             ("", " " * inner_pad),
-            (key_style, f"{right_label} "),
-            (val_style, right_val),
+            *right_fragments,
             ("", gap_right),
             (box_style, "│"),
         ]
@@ -356,6 +362,26 @@ def _panel_rows(
     return lines
 
 
+def _panel_cell(
+    label: str,
+    value: str,
+    *,
+    width: int,
+    key_style: str,
+    value_style: str,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Clip a panel cell while keeping its styled fragments in lockstep."""
+    prefix = f"{label} "
+    if cell_width(prefix) >= width:
+        text = clip_cells(prefix + value, width, tab_size=8)
+        return text, [(key_style, text)]
+    shown_value = clip_cells(value, width - cell_width(prefix), tab_size=8)
+    return prefix + shown_value, [
+        (key_style, prefix),
+        (value_style, shown_value),
+    ]
+
+
 def _title_line(*, version: str, width: int) -> TranscriptLine:
     """Build the NessAgent title (light gray) + version row."""
     left = "Ness"
@@ -366,11 +392,13 @@ def _title_line(*, version: str, width: int) -> TranscriptLine:
         (title_style, agent),
     ]
     # version appended with a dim style and one space gap
-    ver_text = f" v{version}"
+    ver_text = clip_cells(
+        f" v{version}", max(0, width - cell_width(left + agent)), tab_size=8
+    )
     title_fragments.append((_char_style(GRAY_DIM), ver_text))
 
     # right-pad with spaces to fill `width` so subsequent rows align
-    used = len(left) + len("Agent") + len(ver_text)
+    used = cell_width(left + agent + ver_text)
     pad = max(0, width - used)
     title_fragments.append(("", " " * pad))
 
@@ -399,14 +427,13 @@ def _hints_line(*, width: int) -> TranscriptLine:
     fragments.append((dim, " · "))
     fragments.append((accent, "/config"))
     text = "".join(t for _, t in fragments)
-    if len(text) > width:
+    if cell_width(text) > width:
         # truncate (rarely: very narrow terminals): drop the tail cleanly
-        cut = max(8, width)
-        text = text[:cut]
+        text = clip_cells(text, width, ellipsis="")
         fragments = [(dim, text)]
-    if len(text) < width:
-        fragments.append(("", " " * (width - len(text))))
-        text += " " * (width - len(text))
+    if cell_width(text) < width:
+        fragments.append(("", " " * (width - cell_width(text))))
+        text += " " * (width - cell_width(text))
     return TranscriptLine(style=dim, text=text, fragments=fragments)
 
 
@@ -418,13 +445,6 @@ def _mode_label(mode: str, approval: bool, yolo: bool = False) -> str:
         return "Act (auto-approval)"
     return mode.capitalize() or "Act"
 
-
-def _truncate(s: str, n: int) -> str:
-    if len(s) <= n:
-        return s
-    if n <= 1:
-        return "…"
-    return s[: n - 1] + "…"
 
 
 def header_lines(
@@ -462,13 +482,13 @@ def header_lines(
                         "Session :",
                         model,
                         "Project :",
-                        _truncate(project, max(20, body_w // 2 - 18)),
+                        clip_cells(project, max(20, body_w // 2 - 18), tab_size=8),
                     ),
                     (
                         "Mode    :",
                         _mode_label(mode, approval, yolo),
                         "Add-ons :",
-                        _truncate(addons_summary, max(20, body_w // 2 - 18)),
+                        clip_cells(addons_summary, max(20, body_w // 2 - 18), tab_size=8),
                     ),
                 ],
                 width=body_w,
@@ -494,13 +514,13 @@ def header_lines(
                     "Session :",
                     model,
                     "Project :",
-                    _truncate(project, max(20, body_w // 2 - 18)),
+                    clip_cells(project, max(20, body_w // 2 - 18), tab_size=8),
                 ),
                 (
                     "Mode    :",
                     _mode_label(mode, approval, yolo),
                     "Add-ons :",
-                    _truncate(addons_summary, max(20, body_w // 2 - 18)),
+                    clip_cells(addons_summary, max(20, body_w // 2 - 18), tab_size=8),
                 ),
             ],
             width=body_w,
@@ -528,7 +548,7 @@ def header_lines(
             else [(r_line.style, r_line.text)]
         )
         r_text = r_line.text
-        short = body_w - len(r_text)
+        short = body_w - cell_width(r_text)
         if short > 0:
             r_frag = r_frag + [("", " " * short)]
             r_text = r_text + " " * short

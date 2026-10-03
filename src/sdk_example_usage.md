@@ -7,8 +7,8 @@ Construct agents with `NessAgent(...)` kwargs (builds an `AgentSpec` internally)
 **App responsibilities (not done by bare `Session.run`):**
 
 - Supply `l2_context` in the prompt when the model needs project/domain structure (SDK does not auto-load repo context).
-- Append user events / call `thread_store.save_checkpoint` if you want resumable threads (the coding CLI does this around the graph).
-- Pass `cost_tracker=make_sdk_cost_tracker()` from `ness_cli.config` when you want estimated USD for non-provider-cost models.
+- Append user events before running each turn if you want resumable threads. The graph persists assistant, tool, and usage events; the CLI adds user events and replay policy around it.
+- Pass `cost_tracker=CostTracker(pricing=...)` from `ness_agent` when you want estimated USD for models without provider-reported cost. Supply your own per-model rates, as shown in the tracing examples below.
 - Supply resolved MCP server settings and own connection approval, trust, and authentication policy when adding MCP (the bare SDK does not read Ness CLI project files).
 
 ---
@@ -38,7 +38,7 @@ await session.run("Plan then implement: add a rate limiter on /api/login")
 - If `overlay=` is omitted, the agent is configured with `CodingOverlay` (`from ness_agent import CodingOverlay`). It renders:
   - `<plan-mode path="...">...</plan-mode>` when `session.mode == "plan"`, using `ness_agent.instructions.PLAN_MODE` (or `modes.plan_mode_template` if you supply a `ModeConfig`). The coding CLI sets `modes.plans_dir` to the global `plans/<project-slug>/` directory; the SDK default string is `.ness/plans/`.
   - `mode_switch` on the first act turn after a plan->act toggle, using `ness_agent.instructions.ACT_MODE` (or `modes.act_mode_template`)
-  - `git`, `compaction`, `todos`, `session_memory`, `loaded_skills`, and `skill_request` sections from the `OverlayContext`
+  - `git`, `compaction`, `todos`, `session_memory`, `skill_catalog`, and `skill_request` sections from the `OverlayContext`
 - To **opt out of L3 entirely** pass `overlay=NoOverlay()` (apps that need no working-state overlay, or want to drive everything from the model alone).
 - To use a **custom L3**, pass your own `OverlayProvider` (see the four examples below).
 
@@ -273,7 +273,7 @@ async def research(topic: str) -> str:
     session.metadata["outline"] = initial_outline(topic)
     session.metadata["sources_collected"] = []
     # Optional: persist a user event for resumable threads
-    # agent.config.thread_store.append_event(session.thread_id, {"kind": "user", "content": topic})
+    # session.config.thread_store.append_event(session.thread_id, {"kind": "user", "content": topic})
     result = await session.run(topic, mode="act")
     await session.finalize_reflection()
     return result.assistant_message
@@ -555,102 +555,143 @@ next turn would put in the system message and working-state tail.
 
 ## SDK persistence recipe
 
-`Session` is the turn engine. Durable thread CRUD lives on
-`agent.config.thread_store` (`ThreadStore`, exported from `ness_agent`).
-Resume/archive are not CLI-only — wire them with the primitives below (or use
-`CodingSession.resume` / `CodingSession.reset` for the batteries-included
-coding path).
+`Session` is the turn engine. Read its effective configuration through
+`session.config`; durable thread CRUD lives on `session.config.thread_store`.
+`ThreadStore` is exported from `ness_agent`.
+
+The SDK primitives for replay are `Session.reset_checkpointer` and
+`Session.bootstrap`. An application owns the conversion of its stored events
+into messages. The example below uses `events_to_messages` and `restore_cost`
+from `ness_cli.session.replay` for the Ness event format. These are internal
+CLI helpers, not supported SDK exports. An independent application should own
+its replay conversion or pin the CLI implementation it depends on.
+
+The CLI itself creates threads with `InteractiveRuntime.new_session` and
+resumes them with `InteractiveRuntime.resume_session`. Its `CodingSession`
+has `resume` and `run_turn`; starting another thread means creating another
+session.
 
 ### Event-kind ownership
 
 | Kind | Writer |
 |------|--------|
-| `user`, `compact` | App / `CodingSession` |
-| `assistant`, `tool`, `usage`, `approval` | Graph (`nodes.py`) |
-| `reflection` | `reflection.py` (durable only; not a `SessionEvent`) |
+| `user`, `compact` | App, or the CLI's `TurnRunner` |
+| `assistant`, `tool`, `usage`, `approval` | SDK graph |
+| `reflection` | SDK reflection, durable only |
 | `compaction_llm` | SDK compaction boundary |
 
-**Important:**
+Append a `user` event before each turn. Do not append the assistant result
+again after `run`: the graph already writes it. `compact` rows record notices;
+`compaction_llm` rows carry the summary checkpoint needed for replay.
+`ThreadStore.list_threads` lists only IDs with the `session-` prefix.
 
-- Bare `Session.run` / `Session.stream` do **not** auto-persist `user` (or
-  `compact`) rows — apps must `append_event`, or use `CodingSession.run_turn`.
-- `ThreadStore.list_threads` currently filters to `session-*` prefixes only;
-  custom thread IDs will not appear until filters are made explicit in a later
-  pass.
+### Offline construction and resume
+
+Save this block as a Python script and run it with `uv run python <script>`
+from a source checkout, or with Python in an environment containing the
+current wheel. It uses a local fake model and temporary storage, so it needs
+no API key and makes no network requests. It constructs a second agent over
+the same storage to simulate a new process, then continues the saved thread.
 
 ```python
-from ness_agent import NessAgent, PromptLayersConfig, ThreadStore
-from ness_cli.events import events_to_messages  # coding transcript rebuild
+import asyncio
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+from ness_agent import NessAgent, NessAgentOptions, NoOverlay, PromptLayersConfig
+from ness_cli.session.replay import events_to_messages, restore_cost
 
 
-# --- small helpers apps can copy --------------------------------------------
+class OfflineModel(FakeListChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self  # This example returns text and never calls tools.
 
-async def persist_user_turn(session, text: str, *, images=None) -> int | None:
-    """Append a user row before session.run / session.stream."""
-    store = session.agent.config.thread_store
+
+def build_agent(root: Path, response: str) -> NessAgent:
+    return NessAgent(
+        model=OfflineModel(responses=[response]),
+        tools=[],
+        overlay=NoOverlay(),
+        prompt=PromptLayersConfig(l0="Answer briefly.", persona="Offline demo."),
+        options=NessAgentOptions(
+            project_root=root,
+            ness_dir=root / ".ness",
+            auto_save_threads=True,
+            reflection_token_ratio=0.0,
+            session_end_reflection=False,
+        ),
+    )
+
+
+def persist_user_turn(session, text: str, *, images=None) -> int | None:
     event = {"kind": "user", "content": text}
     if images:
         event["images"] = list(images)
-    return store.append_event(session.thread_id, event)
-
-
-async def persist_assistant_turn(session, text: str) -> int | None:
-    store = session.agent.config.thread_store
-    return store.append_event(
-        session.thread_id, {"kind": "assistant", "content": text}
-    )
+    return session.config.thread_store.append_event(session.thread_id, event)
 
 
 async def archive_thread(session) -> str:
-    """Finalize reflection (if enabled) and archive the current thread."""
     await session.finalize_reflection()
-    return session.agent.config.thread_store.archive_thread(session.thread_id)
+    return session.config.thread_store.archive_thread(session.thread_id)
 
 
-async def resume_thread(session, thread_id: str, *, vision: bool | None = None) -> bool:
-    """Rebuild live graph state from the durable event log.
-
-    Uses Session.reset_checkpointer + Session.bootstrap so the event log is
-    the single source of truth (do not reuse a dirty MemorySaver).
-    """
-    store = session.agent.config.thread_store
-    events = store.load_thread_events(thread_id)
+async def resume_thread(session, *, vision: bool | None = None) -> bool:
+    """Replay into a fresh session whose thread_id is already selected."""
+    store = session.config.thread_store
+    events = store.load_thread_events(session.thread_id)
     if not events:
         return False
-    # Use the effective session view so temporary approval rules are preserved.
-    permission_store = session.config.permission_store
     messages = events_to_messages(
         events,
-        store.list_subagents(thread_id),
+        subagents=store.list_subagents(session.thread_id),
         vision=vision,
-        permission_store=permission_store,
+        permission_store=session.config.permission_store,
     )
-    session.thread_id = thread_id
+    restore_cost(events, session.cost_tracker)
     session.reset_checkpointer()
     session.bootstrap(messages)
     await session.refresh_context_snapshot()
     return True
 
 
-async def list_recent_threads(session, n: int = 10) -> list[dict]:
-    return session.agent.config.thread_store.list_threads(n)
+async def main() -> None:
+    with TemporaryDirectory(prefix="ness-sdk-demo-") as directory:
+        root = Path(directory)
+        thread_id = "session-offline-demo"
+        agent = build_agent(root, "First answer")
+        session = agent.session(thread_id=thread_id, git_available=False)
+        persist_user_turn(session, "First question")
+        result = await session.run("First question")
+        assert result.assistant_message == "First answer"
+
+        restarted_agent = build_agent(root, "Second answer")
+        resumed = restarted_agent.session(thread_id=thread_id, git_available=False)
+        assert await resume_thread(resumed)
+        persist_user_turn(resumed, "Follow-up question")
+        await resumed.run("Follow-up question")
+
+        messages = await resumed.get_messages()
+        assert [message.content for message in messages] == [
+            "First question", "First answer", "Follow-up question", "Second answer",
+        ]
+        events = resumed.config.thread_store.load_thread_events(thread_id)
+        assert sum(event["kind"] == "assistant" for event in events) == 2
+        assert resumed.config.thread_store.list_threads(10)[0]["thread_id"] == thread_id
+        print("Saved and resumed four messages without network access.")
 
 
-# --- usage ------------------------------------------------------------------
-
-agent = NessAgent(model=..., prompt=PromptLayersConfig())
-session = agent.session(thread_id="session-demo-1")
-
-await persist_user_turn(session, "add a rate limiter")
-result = await session.run("add a rate limiter")
-await persist_assistant_turn(session, result.assistant_message)
-
-# later, in another process:
-session2 = agent.session(thread_id="session-fresh")
-ok = await resume_thread(session2, "session-demo-1")
-assert ok
-messages = await session2.get_messages()  # public read — no app.aget_state needed
+asyncio.run(main())
 ```
+
+The helper expects a fresh session and one replay. Repeated cost restoration
+would count the same history twice. `bootstrap` seeds the next turn; the
+example runs a follow-up before inspecting the resulting conversation. For
+custom persistent checkpointers, provide a cleared or independently scoped
+thread before replay; replacing the saver object alone does not clear its
+backing store. Vision applications must pass the same vision policy when
+constructing the session and converting saved image events.
 
 Public reads on `Session`: `get_state()`, `get_messages()`, `get_todos()`,
 `refresh_context_snapshot()`.

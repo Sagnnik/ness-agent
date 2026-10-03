@@ -116,11 +116,12 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
     main_model = config.model
     model_name = getattr(config.model, "model", "") or getattr(config.model, "model_name", "")
 
-    def _build_system_message() -> SystemMessage:
-        all_skills = skills_loader.load()
+    def _build_system_message(available_skills=None) -> SystemMessage:
+        if available_skills is None:
+            available_skills = skills_loader.load()
         user_mem = memory.load_user() if not memory.disabled else ""
         proj_mem = memory.load_project() if not memory.disabled else ""
-        skill_catalog = skills_loader.render_catalog(all_skills)
+        skill_catalog = skills_loader.render_catalog(available_skills)
         return SystemMessage(content=prompts.build_stable_prefix(
             tools_reg.active_tools,
             user_memory=user_mem,
@@ -419,7 +420,8 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         set_current_thread(thread_id)
         set_thread_todos(thread_id, list(state.get("todos", [])))
 
-        system = _build_system_message()
+        available_skills = skills_loader.load()
+        system = _build_system_message(available_skills)
 
         conversation = _effective_conversation(messages, state)
         compaction_status = dict(state.get("compaction_status") or {})
@@ -439,6 +441,12 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         else:
             compaction_note = str(overlay_note)
 
+        if compaction_status.get("compacted") and available_skills:
+            compaction_note += (
+                "\nIf following a skill's procedure, reload its instructions "
+                "with skill_view after compaction."
+            )
+
         cwd = options.project_root or Path.cwd()
         git_snapshot = (
             await asyncio.to_thread(git_worktree_summary, cwd)
@@ -447,6 +455,12 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
 
         # L3 Overlay
         if overlay_provider is not None:
+            skill_catalog = str(state.get("skill_catalog") or "")
+            if (
+                compaction_status.get("compacted")
+                and not prompts.config.include_skill_catalog
+            ):
+                skill_catalog = skills_loader.render_current_catalog()
             overlay_context = OverlayContext(
                 thread_id=thread_id,
                 mode=(state.get("mode") or rt.resolved_mode),
@@ -458,8 +472,8 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                 metadata=rt.metadata,
                 git_snapshot=git_snapshot,
                 git_available=rt.repo_has_git,
-                activate_skills=list(state.get("activate_skills", [])),
-                loaded_skills=list(state.get("loaded_skills", [])),
+                requested_skills=[name for name in state.get("requested_skills", []) if name in available_skills],
+                skill_catalog=skill_catalog,
             )
             sections = overlay_provider.sections(state, overlay_context) or {}
         else:
@@ -485,8 +499,10 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         updates: AgentState = {
             "messages": [],
             "approval_declined": {},
+            "approval_file_access": {},
             "force_compact": False,
-            "activate_skills": [],
+            "requested_skills": [],
+            "skill_catalog": "",
             "mode_switch": "",
             "compaction_status": {},
         }
@@ -585,20 +601,38 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
     async def approval_gate(state: AgentState) -> AgentState:
         """The approval gate node that handles the approval logic."""
         calls = extract_tool_calls(state["messages"][-1])
-        gated = [(n, a, cid) for n, a, cid in calls if _needs_approval(n, a, options, permission_store, tools_reg)]
+        readonly = (state.get("mode") or rt.resolved_mode).lower() == "plan" and (
+            config.modes is None or config.modes.plan_mode_readonly
+        )
+        gated = [
+            (n, a, cid) for n, a, cid in calls
+            if not (readonly and not tools_reg.is_read_only(n, a))
+            and _needs_approval(n, a, options, permission_store, tools_reg)
+        ]
 
         if not gated:
-            return {"approval_declined": {}}
+            return {"approval_declined": {}, "approval_file_access": {}}
 
         ah = config.approval_handler
         denials: dict[str, str] = {}
+        approved: dict[str, list[dict]] = {}
         for name, args, call_id in gated:
             if ah is None:
                 persist.append_event(thread_id, {"kind": "approval", "tool": name, "decision": "no"})
                 denials[call_id] = f"Approval required but no handler configured: {name}"
                 continue
 
-            decision = await ah(name, args)
+            access = permission_store.file_access_requests(name, args)
+            prompt_args = dict(args)
+            if access:
+                prompt_args["filesystem_access"] = access
+            decision = await ah(name, prompt_args)
+            if decision in {"yes", "session", "always"}:
+                approved[call_id] = access
+                if decision != "yes":
+                    permission_store.remember_file_access(access, allow=True, scope=decision)
+            elif decision == "never":
+                permission_store.remember_file_access(access, allow=False, scope="always")
 
             if decision == "always":
                 rule = permission_store.default_rule_for(name, args)
@@ -637,11 +671,15 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             persist.append_event(thread_id, {"kind": "approval", "tool": name, "decision": "no"})
             denials[call_id] = f"Denied by user approval: {name}"
 
-        updates: AgentState = {"approval_declined": denials}
+        updates: AgentState = {"approval_declined": denials, "approval_file_access": approved}
         # When every tool_call in the batch is denied, emit ToolMessages here and
         # skip tools_node. Partial denials are left for tools_node so siblings run.
         if _all_calls_denied(calls, denials):
             updates["messages"] = _denial_tool_messages(calls, denials)
+            for name, args, call_id in calls:
+                persist.append_event(thread_id, _tool_event(
+                    name, args, denials[call_id], 0, call_id=call_id, exit_status="denied",
+                ))
         return updates
 
     async def tools_node(state: AgentState) -> AgentState:
@@ -649,7 +687,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         # get the last AIMessage and extract the tool calls
         calls = extract_tool_calls(state["messages"][-1])
         if not calls:
-            return {"messages": [], "approval_declined": {}}
+            return {"messages": [], "approval_declined": {}, "approval_file_access": {}}
 
         set_subagent_runtime(main_model, thread_id)
         set_question_runtime(config.question_handler)
@@ -659,9 +697,6 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         # store tool results in a list of ToolMessage objects
         results: list[ToolMessage] = []
         cur_mode = (state.get("mode") or rt.resolved_mode).lower()
-        newly_loaded_names: set[str] = set()
-        # Fresh catalog for loaded_skills eligibility (matches skill_view context).
-        all_skills = skills_loader.load()
         denials = state.get("approval_declined") or {}
         if not isinstance(denials, dict):
             denials = {}
@@ -748,15 +783,17 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                     # Canonical JSON form parsed by Langfuse/Arize as tool input.
                     tool_span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, json.dumps(args, default=str))
                 try:
-                    if tmap is None:
-                        result = f"Error: unknown tool {name}"
-                        tool_span.set_attribute(TOOL_EXIT_STATUS, "unknown_tool")
-                    elif getattr(tmap, "is_async", False) or getattr(tmap, "coroutine", None) is not None:
-                        result = await tmap.ainvoke(args)
-                        tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
-                    else:
-                        result = await asyncio.to_thread(tmap.invoke, args)
-                        tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
+                    grants = (state.get("approval_file_access") or {}).get(call_id, [])
+                    with permission_store.file_access(grants):
+                        if tmap is None:
+                            result = f"Error: unknown tool {name}"
+                            tool_span.set_attribute(TOOL_EXIT_STATUS, "unknown_tool")
+                        elif getattr(tmap, "is_async", False) or getattr(tmap, "coroutine", None) is not None:
+                            result = await tmap.ainvoke(args)
+                            tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
+                        else:
+                            result = await asyncio.to_thread(tmap.invoke, args)
+                            tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
                     tool_span.set_attribute(TOOL_ERROR, False)
                 except Exception as exc:
                     tool_span.record_exception(exc)
@@ -804,27 +841,11 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                 _tool_event(name, args, display_text, dur, call_id=call_id),
             )
 
-            # Track skills loaded via skill_view for the L3 overlay
-            if name == "skill_view" and not display_text.startswith("Error:"):
-                sk_name = str(args.get("name", ""))
-                if sk_name and sk_name in all_skills:
-                    newly_loaded_names.add(sk_name)
-        # Merge newly-loaded skills into persistent loaded_skills state
-        existing = list(state.get("loaded_skills", []))
-        existing_names = {s.get("name", "") for s in existing}
-        for sk_name in sorted(newly_loaded_names):
-            if sk_name not in existing_names and sk_name in all_skills:
-                sk = all_skills[sk_name]
-                existing.append({
-                    "name": sk.get("name", sk_name),
-                    "description": sk.get("description", ""),
-                    "path": sk.get("source", ""),
-                })
         return {
             "messages": results,
             "todos": get_thread_todos(thread_id),
-            "loaded_skills": existing,
             "approval_declined": {},
+            "approval_file_access": {},
         }
 
     async def route_after_agent(state) -> Literal["approval_gate", "tools", "__end__"]:
@@ -835,17 +856,15 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
 
         cur = (state.get("mode") or rt.resolved_mode).lower()
 
-        # Plan-mode mutating tools skip the approval gate (still denied in tools_node
-        # when plan_mode_readonly is on).
-        readonly = (
-            True if config.modes is None else bool(config.modes.plan_mode_readonly)
+        # Plan-mode writes remain gated, while independent external reads can
+        # still ask for approval in a mixed tool batch.
+        readonly = cur == "plan" and (
+            config.modes is None or config.modes.plan_mode_readonly
         )
-        if (
-            cur == "plan"
-            and readonly
-            and any(not tools_reg.is_read_only(n, a) for n, a, _ in calls)
-        ):
-            return "tools"
+        eligible = [
+            (n, a) for n, a, _ in calls
+            if not (readonly and not tools_reg.is_read_only(n, a))
+        ]
 
         # if the approval is enabled and the tool needs approval then return the approval gate node
         if (
@@ -853,7 +872,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             and not getattr(options, "yolo_mode", False)
             and any(
                 _needs_approval(n, a, options, permission_store, tools_reg)
-                for n, a, _ in calls
+                for n, a in eligible
             )
         ):
             return "approval_gate"

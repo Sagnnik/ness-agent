@@ -6,6 +6,9 @@ import os
 import tempfile
 import threading
 from pathlib import Path
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Iterator
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
 
@@ -47,6 +50,7 @@ DEFAULT_RULES = {
     "ask": ["*"],
 }
 
+
 class PermissionStore:
     def __init__(
         self,
@@ -59,12 +63,14 @@ class PermissionStore:
 
         Args:
             ness_dir: Directory containing the ``permissions.json`` file.
-            project_root: Root of the project — all path validation is relative to this.
-                          Defaults to ``cwd``.
+            project_root: Base for relative file paths and default native file access. Defaults to cwd.
         """
         self.ness_dir = Path(ness_dir)
         self.permissions_file = self.ness_dir / "permissions.json"
         self.project_root = (project_root or Path.cwd()).resolve()
+        self._file_access: ContextVar[tuple[dict, ...]] = ContextVar(
+            "ness_file_access", default=()
+        )
         self._session_rules: dict[str, list[str]] = {"allow": [], "deny": []}
         self._persistent_lock = _persistent_lock or threading.RLock()
 
@@ -81,29 +87,155 @@ class PermissionStore:
         }
         return fork
 
-    def validate_path(self, path: str) -> str:
-        """Resolve *path* to an absolute path and verify it lies under ``project_root``.
-
-        Raises:
-            PermissionError: If the resolved path is outside ``project_root``.
-            ValueError: If *path* is malformed.
-        """
+    def resolve_path(self, path: str) -> Path:
+        """Resolve relative paths against the project without granting access."""
         try:
             candidate = Path(path)
             if not candidate.is_absolute():
                 candidate = self.project_root / candidate
-            resolved = candidate.resolve()
-            if not resolved.is_relative_to(self.project_root):
-                raise PermissionError(f"{path} is outside {self.project_root}")
-            return str(resolved)
-        except PermissionError:
-            raise
+            return candidate.resolve()
         except Exception as exc:
             raise ValueError(f"Invalid path: {path} ({exc})") from exc
 
-    def relative_to_root(self, path: str) -> str:
-        """Resolve *path* (via :meth:`validate_path`) and return it relative to the project root."""
-        return str(Path(self.validate_path(path)).relative_to(self.project_root))
+    def _protected_write(self, path: Path) -> bool:
+        protected = (
+            self.ness_dir.resolve(),
+            *(self.project_root / name for name in (".git", ".ness")),
+        )
+        return any(path.is_relative_to(root.resolve()) for root in protected)
+
+    @staticmethod
+    def _file_rule(access: dict) -> str:
+        return "filesystem:" + json.dumps(access, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _covers(access: dict, path: Path, write: bool, recursive: bool = False) -> bool:
+        if not isinstance(access, dict) or not isinstance(access.get("path"), str):
+            return False
+        if not isinstance(access.get("write"), bool) or not isinstance(
+            access.get("recursive"), bool
+        ):
+            return False
+        if write and not access.get("write"):
+            return False
+        if recursive and not access["recursive"]:
+            return False
+        root = Path(access["path"])
+        return root.is_absolute() and (
+            path == root or (access["recursive"] and path.is_relative_to(root))
+        )
+
+    def _file_decision(
+        self, path: Path, *, write: bool, recursive: bool = False
+    ) -> Decision:
+        rules = self._load()
+        # Denials win over remembered grants and one-call approvals.
+        for bucket in ("deny", "allow"):
+            for rule in (*rules.get(bucket, []), *self._session_rules[bucket]):
+                if not isinstance(rule, str) or not rule.startswith("filesystem:"):
+                    continue
+                try:
+                    access = json.loads(rule.removeprefix("filesystem:"))
+                    if (
+                        bucket == "deny"
+                        and isinstance(access, dict)
+                        and access.get("write") != write
+                    ):
+                        continue
+                    if self._covers(access, path, write, recursive):
+                        return bucket
+                except (TypeError, ValueError, KeyError):
+                    continue
+        if any(
+            self._covers(access, path, write, recursive)
+            for access in self._file_access.get()
+        ):
+            return "allow"
+        return "ask"
+
+    def file_access_requests(self, tool: str, args: dict) -> list[dict]:
+        """Return canonical external paths whose access needs approval.
+
+        Search directories request recursive read access; mutations request only
+        their exact targets. Tool-wide allow rules do not grant filesystem access.
+        """
+        if tool not in {"read", "write", "edit", "delete", "grep", "glob"}:
+            return []
+        write = tool in {"write", "edit", "delete"}
+        paths = args.get("paths", []) if tool == "delete" else [args.get("path", ".")]
+        requests = []
+        for raw in paths:
+            try:
+                path = self.resolve_path(raw)
+            except (TypeError, ValueError):
+                continue  # Invalid inputs are reported by the tool itself.
+            if path.is_relative_to(self.project_root) or (
+                write and self._protected_write(path)
+            ):
+                continue
+            recursive = tool == "glob" or (tool == "grep" and path.is_dir())
+            if self._file_decision(path, write=write, recursive=recursive) == "ask":
+                requests.append(
+                    {
+                        "path": str(path),
+                        "write": write,
+                        "recursive": recursive,
+                    }
+                )
+        return requests
+
+    def remember_file_access(
+        self, requests: list[dict], *, allow: bool, scope: RuleScope
+    ) -> None:
+        for access in requests:
+            self.persist_rule(
+                self._file_rule(access), "allow" if allow else "deny", scope=scope
+            )
+
+    @contextmanager
+    def file_access(self, requests: list[dict]) -> Iterator[None]:
+        """Install approvals only for this tool invocation and its worker context."""
+        token = self._file_access.set(tuple(requests))
+        try:
+            yield
+        finally:
+            self._file_access.reset(token)
+
+    def validate_path(
+        self,
+        path: str,
+        *,
+        write: bool = False,
+        yolo_mode: bool = False,
+        recursive: bool = False,
+    ) -> str:
+        """Resolve a path and enforce project scope or an approved external grant.
+
+        YOLO bypasses scope and protected-write checks; OS permissions still apply.
+        """
+        resolved = self.resolve_path(path)
+        if yolo_mode:
+            return str(resolved)
+        if write and self._protected_write(resolved):
+            raise PermissionError(f"refusing to modify protected path {path}")
+        if (
+            not resolved.is_relative_to(self.project_root)
+            and self._file_decision(resolved, write=write, recursive=recursive)
+            != "allow"
+        ):
+            raise PermissionError(
+                f"{resolved} is outside {self.project_root}; access requires approval"
+            )
+        return str(resolved)
+
+    def relative_to_root(
+        self, path: str, *, write: bool = False, yolo_mode: bool = False
+    ) -> str:
+        """Return a project-relative label, or an absolute external-path label."""
+        resolved = Path(self.validate_path(path, write=write, yolo_mode=yolo_mode))
+        if resolved.is_relative_to(self.project_root):
+            return str(resolved.relative_to(self.project_root))
+        return str(resolved)
 
     def check(self, tool: str, args: dict) -> Decision:
         """Return the effective decision (``"allow"``, ``"deny"``, or ``"ask"``)
@@ -116,6 +248,26 @@ class PermissionStore:
         return decision
 
     def check_with_rule(self, tool: str, args: dict) -> tuple[Decision, str | None]:
+        decision, rule = self._check_tool_with_rule(tool, args)
+        if decision == "deny":
+            return decision, rule
+        if tool in {"read", "write", "edit", "delete", "grep", "glob"}:
+            write = tool in {"write", "edit", "delete"}
+            paths = (
+                args.get("paths", []) if tool == "delete" else [args.get("path", ".")]
+            )
+            for raw in paths:
+                try:
+                    path = self.resolve_path(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not path.is_relative_to(self.project_root):
+                    if self._file_decision(path, write=write) == "deny":
+                        return "deny", "filesystem access denied"
+            if self.file_access_requests(tool, args):
+                return "ask", "outside project access"
+        return decision, rule
+    def _check_tool_with_rule(self, tool: str, args: dict) -> tuple[Decision, str | None]:
         """Evaluate *tool* + *args* against persisted and session rules.
 
         Returns ``(decision, matched_rule)`` where *matched_rule* is the

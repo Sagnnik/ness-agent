@@ -1,1 +1,1 @@
-"""Focused tests for the production Ness Agent TUI."""
+"""Tests for the explicit-runtime CLI implementation."""

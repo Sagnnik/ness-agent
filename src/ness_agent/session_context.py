@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any
 
 from ness_agent.options import NessAgentOptions
@@ -11,6 +12,7 @@ from ness_agent.persistence import ThreadStore
 
 if TYPE_CHECKING:
     from ness_agent.agent import NessAgentConfig
+    from ness_agent.tools.shell_processes import ProcessManager
 
 
 @dataclass
@@ -21,8 +23,23 @@ class SessionContext:
     ness_dir: Path
     project_root: Path
     agent_config: NessAgentConfig | None = None
-    all_skills: dict[str, Any] | None = None
+    available_skills: dict[str, Any] | None = None
     vision: bool | None = None
+    shell_process_manager: ProcessManager | None = None
+    shell_cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    shell_deadline: float | None = None
+    _shell_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def get_shell_process_manager(self) -> ProcessManager:
+        from ness_agent.tools.shell_processes import ProcessManager
+
+        with self._shell_lock:
+            if self.shell_process_manager is None:
+                self.shell_process_manager = ProcessManager(
+                    project_root=self.project_root,
+                    runtime_root=self.ness_dir / "runtime" / "shells",
+                )
+            return self.shell_process_manager
 
 
 _session_ctx: ContextVar[SessionContext | None] = ContextVar("ness_agent_session_context", default=None)

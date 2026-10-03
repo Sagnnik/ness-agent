@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import unittest
-from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("OPENAI_API_KEY", "test")

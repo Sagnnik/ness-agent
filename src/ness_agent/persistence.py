@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json, sqlite3, threading
 from contextlib import contextmanager
+from copy import copy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -84,6 +85,17 @@ class ThreadStore:
         self.default_model = default_model or ""
         self._write_lock = threading.Lock()
         self._validate_existing_schema()
+
+    def fork_for_session(self, *, auto_save: bool | None = None) -> ThreadStore:
+        """Share the database and writer lock with an independent autosave flag.
+
+        Keep this view's policy unless the session supplies an explicit value.
+        Forking opens no connection and does not create or alter the database.
+        """
+        fork = copy(self)
+        if auto_save is not None:
+            fork.auto_save = bool(auto_save)
+        return fork
 
     def _validate_existing_schema(self) -> None:
         """Reject pre-name databases without changing or deleting them."""

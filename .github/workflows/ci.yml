@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -19,14 +23,16 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --locked --all-extras
 
-      - name: Compile
-        run: uv run python -m compileall -q .
-        env:
-          OPENAI_API_KEY: test
+      - name: Verify source and installable packages
+        run: uv run --no-sync python scripts/check_release.py --dist-dir dist
 
-      - name: Run pytest
-        run: uv run pytest -q
-        env:
-          OPENAI_API_KEY: test
+      - name: Upload verified packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-packages
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error

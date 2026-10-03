@@ -17,7 +17,8 @@ agent.session(*, thread_id: str, mode: str | None = None,
               on_plan_turn: PlanTurnHandler | None = None,
               on_interrupt: InterruptHandler | None = None,
               model: BaseChatModel | None = None,
-              reflection_model: BaseChatModel | None | object = _UNSET) -> Session
+              reflection_model: BaseChatModel | None | object = _UNSET,
+              deadline: float | None = None) -> Session
 agent.configure_default_models(*, model: BaseChatModel,
                                reflection_model: BaseChatModel | None,
                                context_window: int | None) -> None
@@ -74,11 +75,13 @@ With an absent overlay, resolution installs `CodingOverlay`; use `NoOverlay()` t
 
 ```python
 await session.run(message: str, *, images: Sequence[str] | None = None,
+                  requested_skills: Sequence[str] | None = None,
                   active_skills: Sequence[str] | None = None,
                   mode: str | None = None) -> RunResult
 
 async for event in session.stream(message: str, *, images=None,
-                                  active_skills=None, mode=None): ...
+                                  requested_skills=None, active_skills=None,
+                                  mode=None): ...
 
 session.config -> NessAgentConfig
 session.cost_tracker -> CostTracker
@@ -99,10 +102,14 @@ Important control and inspection methods:
 | `set_mode(mode)` / `toggle_mode() -> str` | Change between `"act"` and `"plan"`; a plan → act switch schedules the context checkpoint. |
 | `set_name(name) -> bool` | Persist a 1–80 character display name for this session; returns `False` when thread autosave is disabled. |
 | `bootstrap(messages)` | Seed prior messages into the next turn once; use for resume or rollback replay. |
-| `cancel()` / `is_cancelled()` | Request and inspect cooperative cancellation of the active stream. |
+| `cancel()` / `is_cancelled()` | Request and inspect cooperative cancellation of the active stream. Active foreground shell groups also receive cancellation. |
+| `await close()` | Close the session's shell runtime, terminate owned foreground and background process groups, and reject further turns. Repeated calls are safe. |
 | `request_compact()` | Request compaction on the next turn. |
 | `configure_models(...)` | Replace this session's effective main/reflection models and context settings, then rebuild its graph. |
-| `active_skills(names)` / `stage_skills(names)` | Replace or append one-shot skills for the next turn. |
+| `requested_skills(names)` / `stage_skills(names)` | Replace or append one-shot skills for the next turn. |
+| `configure_skills(skills, *, disabled_skill_ids=())` | Install application-selected records as this session's discovery snapshot and replace its disabled-ID set. |
+| `set_skill_access(disabled_skill_ids)` | Replace this session's disabled-ID set and refresh its catalog. |
+| `refresh_skill_catalog()` | Schedule the current L3 catalog when `include_skill_catalog=False`; with L1 catalogs, the next system prompt already reflects access changes. |
 | `get_state()`, `get_messages()`, `get_todos()` | Async snapshots of the checkpointed state. |
 | `preview_context(mode=None) -> ContextPreview` | Assemble L0–L3 for debugging without running the model. |
 | `run_reflection()` | Immediately reflect on the unreflected conversation tail and return a `ReflectionResult`, regardless of automatic-reflection settings. |
@@ -110,6 +117,10 @@ Important control and inspection methods:
 | `rebuild_graph()` / `reset_checkpointer()` | Recompile the graph; the latter swaps in a fresh checkpointer before replay. |
 
 Source: `src/ness_agent/session.py`.
+
+Applications own skill defaults, storage, and resume policy. Each session starts with a fresh directory-backed loader; agent-loader snapshots and disabled IDs are not inherited. Apply `configure_skills()` or `set_skill_access()` to each session as needed. With `include_skill_catalog=False`, a custom overlay must render `ctx.skill_catalog`; staged requests require rendering `ctx.requested_skills`. Context previews include pending catalogs without consuming their delivery. Requests are limited to available skills. Viewed bodies remain in conversation history; no separate loaded-skill list is kept.
+
+`active_skills(names)` and the `active_skills=` argument on `run()`/`stream()` remain compatibility aliases. An explicit `requested_skills=` takes precedence. `OverlayContext.activate_skills` is a read-only compatibility alias for `requested_skills`; new context construction uses `requested_skills=`. The removed loaded-skill graph/context fields are not replaced with another tracking structure. After compaction, the compaction note carries a general reminder to reload relevant instructions when skills are available.
 
 ### Turn records and handler types
 
@@ -134,7 +145,7 @@ All are dataclasses, passed through `AgentSpec` or the `NessAgent` keyword const
 
 | Export | Key fields and use |
 | --- | --- |
-| `NessAgentOptions` | `context_window`, `compaction_token_budget`, `compaction_buffer_tokens`, `compaction_summary_max_tokens`, `enable_approval`, `yolo_mode`, `auto_save_threads`, reflection settings, `format_on_write`, `exa_api_key`, `project_root`, `ness_dir`, interruption marker, and `recursion_limit`. These are runtime knobs, not prompt text. |
+| `NessAgentOptions` | `context_window`, `compaction_token_budget`, `compaction_buffer_tokens`, `compaction_summary_max_tokens`, `enable_approval`, `yolo_mode`, `auto_save_threads`, reflection settings, `format_on_write`, `exa_api_key`, `project_root`, `ness_dir`, `shell_default_timeout`, `shell_max_timeout`, interruption marker, and `recursion_limit`. These are runtime knobs, not prompt text. |
 | `MemoryConfig` | `disabled`, plus optional paths for project, user, and session memory. Used when no custom `MemoryBackend` is injected. |
 | `ModeConfig` | `default` mode, optional `plans_dir`, custom plan/act instruction templates, and `plan_mode_readonly`. |
 | `SubagentConfig` | Optional subagent prompt template, `max_parallel`, default tool names, and timeout. It supports the `spawn_subagent` tool. |
@@ -176,11 +187,11 @@ render_overlay_delta(sections, previous, *, skip=frozenset()) -> str
 wrap_system_reminder(body: str) -> str
 ```
 
-`OverlayContext` is the immutable per-turn input to a provider: thread id, mode, current messages/todos, session memory, compaction and mode-switch notes, metadata, Git snapshot, requested skills, and accumulated loaded skills. A custom provider must subclass `OverlayProvider`, return stable section names from `sections()`, and leave empty sections falsy. Stable names let the harness send only changed L3 sections during a tool loop.
+`OverlayContext` is the immutable per-turn input to a provider: thread id, mode, current messages/todos, session memory, compaction and mode-switch notes, metadata, Git snapshot, requested skills, and the current skill catalog. A custom provider must subclass `OverlayProvider`, return stable section names from `sections()`, and leave empty sections falsy. Stable names let the harness send only changed L3 sections during a tool loop.
 
 `CodingOverlay` is the default provider; it renders plan/act instructions, Git state, compaction status, todos, session memory, and skill information. `NoOverlay` always renders an empty mapping. `render_overlay_delta()` compares section dictionaries, and `wrap_system_reminder()` surrounds non-empty L3 content with the SDK’s system-reminder tags.
 
-`AgentState` is the checkpointed `TypedDict` used by the graph. Its public keys include `messages`, `todos`, `mode`, approval state, requested/loaded skills, reflection and compaction state, `force_compact`, input tokens, and `mode_switch`. Treat it as graph state, not a long-lived application schema.
+`AgentState` is the checkpointed `TypedDict` used by the graph. Its public keys include `messages`, `todos`, `mode`, approval state, requested skills and the skill catalog, reflection and compaction state, `force_compact`, input tokens, and `mode_switch`. Treat it as graph state, not a long-lived application schema.
 
 Sources: `src/ness_agent/context/overlay.py`, `context/coding_overlay.py`, and `graph/state.py`.
 
@@ -202,6 +213,16 @@ The registry owns known tools and the currently bound active set. Core reads are
 
 The default tool list includes file read/write/delete/edit/glob, search, web fetch/search, shell, todos, tool discovery, subagents, questions, and skill viewing. In vision-capable sessions, `read` normalizes supported raster files and returns structured image content; PDFs and videos must first be rendered or split into raster frames. Image payloads are redacted from durable and display-facing events. This is not an API guarantee for every named tool; configure an explicit tool sequence when a host application needs a narrower contract.
 
+The shell subsystem owns a `ProcessManager` per live session for foreground and background executions. Its `start`, `jobs`, `read`, and `kill` actions operate on that session's jobs, which survive between turns until stopped or `await session.close()` is called. Commands still run from `project_root`. Job output and diagnostic metadata live under `<ness_dir>/runtime/shells/<manager_id>/<job_id>/`, even when `ness_dir` is outside the project. Internal runtime storage does not pass through the file-tool root validator.
+
+Hosts must close sessions in `finally` blocks; the CLI does this automatically. Closing a session stops owned process groups, including children still running after their command shell exits. A failed launch also cleans up any process it started. Background jobs are not restored from saved metadata or from the previous shared `jobs.json` registry when a session or application restarts. Logs remain available on disk for inspection; output reads are bounded, but log storage has no automatic rotation yet. Shell jobs use noninteractive Bash with combined standard output/error, not a terminal or PTY.
+
+Foreground `run` captures its complete output in the same runtime storage and returns `job_id` and `log_path`, including on failure, timeout, or cancellation. Only background jobs appear in `jobs`. Recover a foreground log through `shell(action="read", job_id=..., offset=0, tail_chars=12000)`. Offsets are zero-based Unicode character positions; continue with `next_offset` while `output_truncated=true`. Omitting `offset` preserves the existing tail behavior. Reads are bounded; saved logs remain after session close, but IDs belong to the live manager and are not adopted on restart.
+
+`NessAgentOptions.shell_default_timeout` defaults to 30 seconds. An explicit positive, finite `timeout` overrides it. `shell_max_timeout` is an optional host cap, defaulting to `None`; the previous hard-coded 600-second cap is removed. Results include `timeout_seconds` and `timeout_reason`, so any reduction is visible. Invalid timeout values fail instead of silently falling back. Cancellation, hard task cancellation, explicitly closed streams, and session close signal active foreground runners to stop their process groups while retaining captured output. Graceful process cleanup may take up to two additional seconds before escalation.
+
+Pass `deadline=time.monotonic() + remaining_seconds` to `agent.session(...)` to constrain foreground shell commands to the host's remaining task budget. Expired deadlines prevent launch. This limits shell execution, not model requests or background-job lifetime; the host must still enforce its overall deadline and close the session. Ordinary shell backgrounding is supported. Children remaining in an owned process group can be cleaned up on session close; commands that create their own detached groups require separate supervision.
+
 ### `PermissionStore`
 
 ```python
@@ -209,7 +230,15 @@ PermissionStore(*, ness_dir: Path = Path(".ness"), project_root: Path | None = N
 store.fork_for_session() -> PermissionStore
 ```
 
-The file-backed policy store validates paths under the project root and resolves tool calls to `allow`, `deny`, or `ask` decisions. The main public operations are `check(tool, args)`, `check_with_rule(tool, args)`, `pattern_key(tool, args)`, `default_rule_for(tool, args)`, `persist_rule(...)`, `remove_rule(bucket, index)`, `list_rules()`, and `clear_session_rules()`. Use it when embedding an operator-approved policy rather than bypassing the tool executor.
+The file-backed policy store validates native file access and resolves tool calls to `allow`, `deny`, or `ask` decisions. The main public operations are `check(tool, args)`, `check_with_rule(tool, args)`, `pattern_key(tool, args)`, `default_rule_for(tool, args)`, `persist_rule(...)`, `remove_rule(bucket, index)`, `list_rules()`, and `clear_session_rules()`. Use it when embedding an operator-approved policy rather than bypassing the tool executor.
+
+Normal mode allows native file tools to access the project. Access outside it asks through the existing approval handler, including read-only `read`, `grep`, and `glob` calls. `glob` accepts an optional `path` directory, defaulting to the project. The approval request includes `filesystem_access` with canonical paths and read/write scope. Accepting once grants only that tool call. Session approval remembers the path for that session, and always approval persists it in `permissions.json`. Read approval does not grant mutation; write approval permits reads of the same target. Directory searches request recursive read access; file mutations request exact paths. Declined requests do not execute, and a missing or disabled approval handler cannot implicitly grant outside access. Broad tool allow rules alone do not grant filesystem scope. Symlink targets are resolved before approval and checked again at execution.
+
+`yolo_mode=True` bypasses approval prompts, tool deny rules, project-path restrictions, and native protected-write checks. Native file tools can then access any path the OS allows, including `.git`, `.ness`, and the configured runtime directory. Normal mode retains those protected-write checks. Relative paths still resolve against the project; external output labels are absolute. Plan-mode read-only rules and host hook vetoes retain their existing behavior.
+
+These policies govern native file tools. Shell commands execute with the host's operating-system privileges; permission rules are not a filesystem sandbox. A host requiring restrictions on arbitrary shell writes must provide OS or container isolation.
+
+CLI Git rollback covers project files. Mutations outside the project are not covered by those snapshots and cannot be automatically restored.
 
 `fork_for_session()` shares the persistent `permissions.json` path and synchronization lock while copying temporary allow/deny rules. A `session` decision therefore affects one session; `always`/`never` decisions are atomically persisted and become visible to every session on the project.
 
@@ -229,7 +258,12 @@ Hooks run on `preToolUse` and `postToolUse`. A matcher selects a tool; a callabl
 
 ```python
 SkillLoader(skills_dir: Path | None = None, *, skills_dirs: Sequence[Path] | None = None)
+loader.discover() -> list[dict[str, Any]]
+loader.all_skills() -> list[dict[str, Any]]
 loader.load() -> dict[str, dict[str, Any]]
+loader.set_snapshot(skills, *, disabled_skill_ids=()) -> None
+loader.set_disabled_skills(skill_ids) -> None
+loader.disabled_skill_ids -> frozenset[str]
 loader.render_catalog(skills) -> str
 
 default_skill_search_dirs(project_root: Path, *,
@@ -242,7 +276,9 @@ merge_skill_dirs(project_root: Path, skills_dir: Path, *,
 
 Loads `SKILL.md` files from the configured roots and returns parsed metadata/body records. Prefer `skills_dirs=` for an explicit exhaustive list; `skills_dir=` is the single-root shorthand. Earlier roots win on name collisions. `render_catalog()` creates the compact stable-prefix catalog; full skill bodies remain on demand.
 
-`default_skill_search_dirs()` returns the well-known project-local and user-global agent skill roots (it does not include `.ness/skills`). `merge_skill_dirs()` puts your directory first, then those roots, deduped by resolved path. Pass `project_rels=` / `global_rels=` to restrict either set. The SDK never scans these roots unless the host passes them via `AgentSpec.skills_dirs`.
+`discover()` groups byte-identical bundles into logical records with `skill_id`, `name`, `description`, `body`, `source`, and physical `sources`. Bundle IDs are content fingerprints. `all_skills()` returns snapshot records when configured, or discovers the roots, including disabled and shadowed records. `load()` excludes disabled IDs and selects the first available record per name. `set_snapshot()` replaces discovery records and access choices for that loader; without a snapshot, edits can change IDs on subsequent discovery. Prefer the public `Session` methods for live session changes because they also refresh catalog delivery. The built-in `skill_view` requires local source paths to enumerate bundle resources.
+
+`default_skill_search_dirs()` returns the well-known project-local roots, then user-global roots, with `.agents/skills` first in each scope. The CLI uses this list and does not discover `.ness/skills`. `merge_skill_dirs()` puts your application-specific directory first, then those roots, deduped by resolved path. Pass `project_rels=` / `global_rels=` to restrict either set. The SDK never scans these roots unless the host passes them via `AgentSpec.skills_dirs`.
 
 Source: `src/ness_agent/skills.py`.
 

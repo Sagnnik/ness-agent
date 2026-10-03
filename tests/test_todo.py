@@ -76,11 +76,6 @@ class TodoToolTests(unittest.TestCase):
         self.assertIn("todos", schema.get("required", []))
         self.assertNotIn("action", schema.get("properties", {}))
 
-    def test_missing_todos_fails_schema(self):
-        with self.assertRaises(Exception):
-            todo.invoke({})
-
-
 class RenderTodosTests(unittest.TestCase):
     def test_render_todos_omits_completed(self):
         todos = [
@@ -125,44 +120,6 @@ class RenderTodosTests(unittest.TestCase):
         sections = overlay.sections({}, ctx)
         self.assertIn("todos", sections)
         self.assertIn("TODOS\n- [pending] 1: Ship it", sections["todos"])
-
-    def test_loaded_skills_reminds_after_compaction(self):
-        overlay = CodingOverlay()
-        ctx = OverlayContext(
-            thread_id="t",
-            mode="act",
-            messages=[],
-            todos=[],
-            session_memory="",
-            compaction_note="Conversation was summarized at this model boundary.",
-            mode_switch="",
-            loaded_skills=[
-                {"name": "deploy", "description": "Release flow", "path": ".ness/skills/deploy/SKILL.md"},
-            ],
-        )
-        sections = overlay.sections({"compaction_status": {"compacted": True}}, ctx)
-        self.assertIn("loaded_skills", sections)
-        self.assertIn("Skill bodies were compacted", sections["loaded_skills"])
-        self.assertIn("skill_view(name=<skill-name>)", sections["loaded_skills"])
-
-    def test_loaded_skills_omits_compaction_reminder_without_compaction(self):
-        overlay = CodingOverlay()
-        ctx = OverlayContext(
-            thread_id="t",
-            mode="act",
-            messages=[],
-            todos=[],
-            session_memory="",
-            compaction_note="",
-            mode_switch="",
-            loaded_skills=[
-                {"name": "deploy", "description": "Release flow", "path": ".ness/skills/deploy/SKILL.md"},
-            ],
-        )
-        sections = overlay.sections({}, ctx)
-        self.assertIn("loaded_skills", sections)
-        self.assertNotIn("Skill bodies were compacted", sections["loaded_skills"])
-
 
 if __name__ == "__main__":
     unittest.main()

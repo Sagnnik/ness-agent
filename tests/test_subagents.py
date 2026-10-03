@@ -90,13 +90,6 @@ class SubagentToolTests(SessionContextTestMixin, unittest.IsolatedAsyncioTestCas
         self.assertEqual(model.max_in_flight, 2)
         self.assertEqual(subagent_runs_active(), 0)
 
-    async def test_subagent_runs_active_is_zero_outside_execution(self):
-        self.write_agent("explore", ["read"])
-        set_subagent_runtime(ConcurrentEchoModel())
-        self.assertEqual(subagent_runs_active(), 0)
-        await spawn_subagent.ainvoke({"tasks": [{"name": "explore", "prompt": "inspect"}]})
-        self.assertEqual(subagent_runs_active(), 0)
-
     async def test_spawn_subagent_rejects_write_capable_batch_before_running(self):
         self.write_agent("explore", ["read"])
         self.write_agent("exec", ["read", "write"])

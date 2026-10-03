@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -37,8 +38,8 @@ def default_skill_search_dirs(
 
     Opt-in helper for host applications — the SDK never scans these
     unless the caller passes them in via ``AgentSpec.skills_dirs``.
-    Does not include ``.ness/skills`` — that comes from the caller via
-    ``skills_dir``.
+    Project roots precede user-global roots, with ``.agents/skills``
+    first in each scope.
 
     ``project_rels`` / ``global_rels`` restrict which project-local
     (relative to ``project_root``) and user-global (relative to the home
@@ -93,7 +94,7 @@ def merge_skill_dirs(
             prompt=prompt,
             skills_dirs=merge_skill_dirs(
                 project_root,
-                project_root / ".ness" / "skills",
+                project_root / "my-app-skills",
             ),
         )
     """
@@ -175,13 +176,65 @@ class SkillLoader:
         # Warnings from the most recent ``load`` (unreadable / invalid skill
         # files). Surfaced by the CLI's /skill command; reset on every load.
         self.errors: list[str] = []
+        self._snapshot: list[dict[str, Any]] | None = None
+        self._disabled_skill_ids: set[str] = set()
 
-    def load(self) -> dict[str, dict[str, Any]]:
+    @staticmethod
+    def source_id(skill: dict[str, Any]) -> str:
+        """Return the canonical identity for one skill source."""
+        explicit = str(skill.get("source_id") or "").strip()
+        if explicit:
+            return explicit
+        source = Path(str(skill.get("source") or ""))
+        try:
+            return str(source.expanduser().resolve())
+        except OSError:
+            return str(source.expanduser())
+
+    @classmethod
+    def skill_id(cls, skill: dict[str, Any]) -> str:
+        """Return the logical identity shared by exact skill copies."""
+        explicit = str(skill.get("skill_id") or "").strip()
+        if explicit:
+            return explicit
+        return f"source:{cls.source_id(skill)}"
+
+    @classmethod
+    def sources(cls, skill: dict[str, Any]) -> tuple[dict[str, str], ...]:
+        """Return every physical source represented by a logical skill."""
+        raw_sources = skill.get("sources")
+        sources: list[dict[str, str]] = []
+        if isinstance(raw_sources, list):
+            for raw in raw_sources:
+                if not isinstance(raw, dict):
+                    continue
+                source = str(raw.get("source") or "")
+                source_id = str(raw.get("source_id") or "")
+                if not source_id and source:
+                    source_id = cls.source_id({"source": source})
+                if source_id:
+                    sources.append({"source_id": source_id, "source": source})
+        if sources:
+            return tuple(sources)
+        return (
+            {
+                "source_id": cls.source_id(skill),
+                "source": str(skill.get("source") or ""),
+            },
+        )
+
+    def fork_for_session(self) -> "SkillLoader":
+        """Return a loader whose snapshot and access rules are session-local."""
+        return SkillLoader(skills_dirs=self.skills_dirs)
+
+    def discover(self) -> list[dict[str, Any]]:
+        """Load skills and collapse byte-identical bundles across roots."""
         self.errors = []
         if not self.skills_dirs:
-            return {}
+            return []
 
-        skills: dict[str, dict[str, Any]] = {}
+        skills: list[dict[str, Any]] = []
+        by_skill_id: dict[str, dict[str, Any]] = {}
         seen_paths: set[Path] = set()
 
         for root in self.skills_dirs:
@@ -197,7 +250,55 @@ class SkillLoader:
                 seen_paths.add(resolved)
                 skill = self._load_skill_md(path)
                 if skill:
-                    skills.setdefault(skill["name"], skill)
+                    source_id = str(resolved)
+                    skill_id = self._bundle_id(path.parent, source_id=source_id)
+                    source = {
+                        "source_id": source_id,
+                        "source": str(path),
+                    }
+                    existing = by_skill_id.get(skill_id)
+                    if existing is not None:
+                        existing["sources"].append(source)
+                        continue
+                    skill["source_id"] = source_id
+                    skill["skill_id"] = skill_id
+                    skill["sources"] = [source]
+                    by_skill_id[skill_id] = skill
+                    skills.append(skill)
+
+        return skills
+
+    def set_snapshot(
+        self,
+        skills: Sequence[dict[str, Any]],
+        *,
+        disabled_skill_ids: Sequence[str] = (),
+    ) -> None:
+        """Freeze discovery records and access choices for this session."""
+        self._snapshot = [dict(skill) for skill in skills]
+        self._disabled_skill_ids = {
+            str(skill_id) for skill_id in disabled_skill_ids
+        }
+
+    def set_disabled_skills(self, skill_ids: Sequence[str]) -> None:
+        self._disabled_skill_ids = {str(skill_id) for skill_id in skill_ids}
+
+    @property
+    def disabled_skill_ids(self) -> frozenset[str]:
+        return frozenset(self._disabled_skill_ids)
+
+    def all_skills(self) -> list[dict[str, Any]]:
+        """Return logical skills in precedence order, including disabled ones."""
+        if self._snapshot is None:
+            return self.discover()
+        return [dict(skill) for skill in self._snapshot]
+
+    def load(self) -> dict[str, dict[str, Any]]:
+        skills: dict[str, dict[str, Any]] = {}
+        for skill in self.all_skills():
+            if self.skill_id(skill) in self._disabled_skill_ids:
+                continue
+            skills.setdefault(str(skill["name"]), skill)
 
         return skills
 
@@ -218,6 +319,36 @@ class SkillLoader:
             line = f"- {name}: {summary}: {source}" if summary else f"- {name}: {source}"
             lines.append(line)
         return "\n".join(lines)
+
+    def render_current_catalog(self) -> str:
+        """Render a complete L3 catalog that supersedes earlier catalogs."""
+        catalog = self.render_catalog(self.load())
+        heading = (
+            "Current effective skill catalog. Use this list instead of any "
+            "earlier skill catalog in the conversation."
+        )
+        if not catalog:
+            return heading + "\n- No skills are currently available."
+        return heading + "\n" + catalog
+
+    def _bundle_id(self, root: Path, *, source_id: str) -> str:
+        """Hash all files in a skill bundle without including its location."""
+        try:
+            files = sorted(path for path in root.rglob("*") if path.is_file())
+            digest = hashlib.sha256()
+            for path in files:
+                relative = path.relative_to(root).as_posix().encode("utf-8")
+                content_digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        content_digest.update(chunk)
+                digest.update(len(relative).to_bytes(8, "big"))
+                digest.update(relative)
+                digest.update(content_digest.digest())
+            return f"sha256:{digest.hexdigest()}"
+        except OSError as exc:
+            self.errors.append(f"{root}: could not fingerprint skill bundle: {exc}")
+            return f"source:{source_id}"
 
     def _split_frontmatter(self, text: str) -> tuple[dict[str, Any], str]:
         if text.startswith("---"):

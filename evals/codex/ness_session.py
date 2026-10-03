@@ -7,7 +7,15 @@ import time
 import uuid
 from pathlib import Path
 
-from langchain_openrouter import ChatOpenRouter
+from codex_chat_model import (
+    CodexChatModel,
+    context_window_for_model,
+    eval_provider_types,
+)
+
+# Check the frozen release before importing or constructing the sandbox SDK.
+CodexAuth, _ = eval_provider_types()
+
 from ness_agent import (
     MemoryConfig,
     ModeConfig,
@@ -15,12 +23,9 @@ from ness_agent import (
     NessAgentOptions,
     PromptLayersConfig,
 )
-from ness_cli.provider.codex.auth import CodexAuth
-
-from codex_chat_model import CodexChatModel, context_window_for_model
 
 
-def auto_answer_question(questions: list[dict]) -> list[dict]:
+async def auto_answer_question(questions: list[dict]) -> list[dict]:
     answers: list[dict] = []
 
     for index, question in enumerate(questions, start=1):
@@ -51,8 +56,6 @@ async def run() -> int:
 
     thread_id = f"session-{uuid.uuid4().hex[:8]}"
     model_name = os.environ.get("NESS_MODEL")
-    provider = os.environ.get("NESS_MODEL_PROVIDER")
-    session_id = os.environ.get("NESS_SESSION_ID") or thread_id
     reasoning_effort = os.environ.get("NESS_MODEL_REASONING_EFFORT") or "xhigh"
 
     auth = CodexAuth()

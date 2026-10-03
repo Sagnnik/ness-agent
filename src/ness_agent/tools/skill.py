@@ -16,7 +16,7 @@ def skill_view(name: str) -> str:
     from ness_agent.session_context import get_session_context
 
     rt = get_session_context()
-    skills = rt.all_skills or {}
+    skills = rt.available_skills or {}
     skill = skills.get(name)
     if not skill:
         available = ", ".join(sorted(skills))

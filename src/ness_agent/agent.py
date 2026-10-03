@@ -23,7 +23,7 @@ from ness_agent.tools import BUILTIN_TOOLS, ToolRegistry
 from ness_agent.utils import normalize_tool
 from ness_agent.tracing.cost import CostTracker
 from ness_agent.tracing.config import TracingConfig
-from ness_agent.tracing.tracer import NoopTracer, Tracer, build_tracer
+from ness_agent.tracing.tracer import Tracer, build_tracer
 if TYPE_CHECKING:
     from ness_agent.session import Session
     from ness_agent.types import (
@@ -102,7 +102,7 @@ class AgentSpec:
     **Filesystem paths**
 
     ``skills_dir``
-        Single skills directory (CLI default ``.ness/skills/``), or
+        Single application-configured skills directory, or
         ``None`` to disable skills entirely. Exactly this directory is
         scanned (including nested category layouts) — the SDK never adds
         other roots implicitly. Mutually exclusive with ``skills_dirs``.
@@ -226,17 +226,20 @@ class NessAgentConfig:
     def fork_for_session(self) -> "NessAgentConfig":
         """Create an effective config with session-local mutable services.
 
-        Project services remain shared by identity. The returned object has
-        the same shape as the resolved agent config so graph construction does
-        not need a parallel configuration hierarchy.
-
-        
+        Project services remain shared. Persistence views share their database
+        and writer lock while keeping autosave policy local to each session.
+        The returned object has the same shape as the resolved agent config
+        so graph construction does not need a parallel configuration hierarchy.
         """
         return replace(
             self,
             options=replace(self.options),  # mutates the options for a single session
+            thread_store=self.thread_store.fork_for_session(
+                auto_save=self.options.auto_save_threads,
+            ),
             permission_store=self.permission_store.fork_for_session(), # new permission store; still shares the permission.json + lock
             tool_registry=self.tool_registry.fork_for_session(),  # own MCP activation / include filter; shares tool catalog
+            skill_loader=self.skill_loader.fork_for_session(),
             cost_tracker=self.cost_tracker.fork_for_session(),   # Empty per session totals; shares pricing; rolls usage upto the agent aggregate.
         )
 
@@ -457,6 +460,7 @@ class NessAgent:
         on_interrupt: "InterruptHandler | None" = None,
         model: BaseChatModel | None = None,
         reflection_model: BaseChatModel | None | object = _UNSET,
+        deadline: float | None = None,
     ) -> Session:
         """Create a runnable :class:`~ness_agent.session.Session` for one thread.
 
@@ -488,6 +492,9 @@ class NessAgent:
             Optional effective-model overrides applied to this session's
             config fork before its graph is compiled. Omitting either inherits
             the corresponding agent default.
+        deadline : float, optional
+            Absolute ``time.monotonic()`` timestamp limiting foreground shell
+            execution. The host remains responsible for its overall task deadline.
         """
         from ness_agent.session import Session
 
@@ -506,6 +513,7 @@ class NessAgent:
             vision=vision,
             on_plan_turn=on_plan_turn,
             on_interrupt=on_interrupt,
+            deadline=deadline,
             _config=cfg,
         )
 

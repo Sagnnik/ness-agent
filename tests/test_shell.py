@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from dataclasses import replace
+from unittest.mock import patch
 from pathlib import Path
 
 import ness_agent.tools.shell as shell
-from ness_agent.session_context import get_session_context
+from ness_agent.tools.shell_processes import _pid_alive, _process_group_alive
 
 from tests.sdk_fixtures import SessionContextTestMixin
 
@@ -18,8 +25,8 @@ def _field(result: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
-def _shell_dir() -> Path:
-    return get_session_context().ness_dir / "runtime" / "shells"
+def _python_command(code: str) -> str:
+    return shlex.join([sys.executable, "-c", code])
 
 
 class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
@@ -27,25 +34,8 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._home = os.environ.get("HOME")
         self.install_ctx(Path(self._tmp.name))
-        shell._job_processes.clear()
 
     def tearDown(self) -> None:
-        try:
-            jobs = shell._load_jobs(_shell_dir())
-            for job_id, job in jobs.items():
-                if job.get("status") != "running":
-                    continue
-                pgid = shell._optional_int(job.get("pgid")) or shell._optional_int(job.get("pid"))
-                if pgid is not None:
-                    shell._kill_process_group(pgid, proc=shell._job_processes.get(job_id), force=True)
-        except Exception:
-            pass
-        for proc in list(shell._job_processes.values()):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        shell._job_processes.clear()
         if self._home is None:
             os.environ.pop("HOME", None)
         else:
@@ -86,7 +76,9 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         result = shell.shell.invoke(
             {
                 "action": "run",
-                "command": "python -c 'import sys,time; sys.stdout.write(\"x\"); sys.stdout.flush(); time.sleep(5)'",
+                "command": _python_command(
+                    'import sys,time; sys.stdout.write("x"); sys.stdout.flush(); time.sleep(5)'
+                ),
                 "timeout": 1,
             }
         )
@@ -101,11 +93,11 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         result = shell.shell.invoke(
             {
                 "action": "run",
-                "command": (
-                    "python -c 'import pathlib,subprocess,time; "
+                "command": _python_command(
+                    "import pathlib,subprocess,time; "
                     "p=subprocess.Popen([\"sleep\",\"10\"]); "
                     "pathlib.Path(\"child.pid\").write_text(str(p.pid)); "
-                    "time.sleep(10)'"
+                    "time.sleep(10)"
                 ),
                 "timeout": 1,
             }
@@ -113,17 +105,17 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         pid = int((self.root / "child.pid").read_text(encoding="utf-8"))
 
         deadline = time.time() + 3
-        while time.time() < deadline and shell._pid_alive(pid):
+        while time.time() < deadline and _pid_alive(pid):
             time.sleep(0.05)
 
         self.assertEqual(_field(result, "status"), "timeout")
-        self.assertFalse(shell._pid_alive(pid))
+        self.assertFalse(_pid_alive(pid))
 
     def test_shell_run_truncates_output(self) -> None:
         result = shell.shell.invoke(
             {
                 "action": "run",
-                "command": "python -c 'print(\"abcdef\")'",
+                "command": _python_command('print("abcdef")'),
                 "max_output_chars": 4,
             }
         )
@@ -131,6 +123,85 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         self.assertEqual(_field(result, "status"), "ok")
         self.assertEqual(_field(result, "output_truncated"), "true")
         self.assertTrue(result.rstrip().endswith("def"))
+
+    def test_foreground_log_survives_truncation_and_can_be_paginated(self) -> None:
+        # Keep external runtime storage within this test's temporary root.
+        project = self.root / "app"
+        project.mkdir()
+        self.ctx.project_root = project
+        self.ctx.ness_dir = self.root / "runtime"
+        output = "first error\n" + "🙂hé\n" * 40 + "last error"
+        result = shell.shell.invoke({
+            "command": _python_command(f"import sys; sys.stdout.write({output!r})"),
+            "max_output_chars": 8,
+        })
+        self.assertEqual(_field(result, "output_truncated"), "true")
+        self.assertEqual(Path(_field(result, "log_path")).read_text(), output)
+        job_id = _field(result, "job_id")
+        recovered = ""
+        offset = 0
+        while True:
+            page = shell.shell.invoke({"action": "read", "job_id": job_id, "offset": offset, "tail_chars": 7})
+            chunk = page.split("output:\n", 1)[1].split("\n\n", 1)[1]
+            recovered += chunk
+            offset = int(_field(page, "next_offset"))
+            if _field(page, "output_truncated") == "false":
+                break
+        self.assertEqual(recovered, output)
+        self.assertNotIn(job_id, shell.shell.invoke({"action": "jobs"}))
+        self.ctx.get_shell_process_manager().close()
+        self.assertEqual(Path(_field(result, "log_path")).read_text(), output)
+
+    def test_foreground_cancellation_stops_group_and_preserves_output(self) -> None:
+        command = _python_command(
+            "import pathlib,subprocess,time; "
+            "p=subprocess.Popen(['sleep','30']); "
+            "print('before cancellation',flush=True); "
+            "pathlib.Path('ready.pid').write_text(str(p.pid)); time.sleep(30)"
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(copy_context().run, shell.shell.invoke, {"command": command})
+            try:
+                self._wait_for_path(self.root / "ready.pid")
+            finally:
+                self.ctx.shell_cancel_event.set()
+            result = future.result(timeout=5)
+        self.assertEqual(_field(result, "status"), "cancelled")
+        job = self.ctx.get_shell_process_manager().get(_field(result, "job_id"))
+        self.assertFalse(_process_group_alive(job["pgid"]))
+        self.assertIn("before cancellation", Path(job["log_path"]).read_text())
+
+    def test_timeouts_report_default_request_and_host_limit(self) -> None:
+        self.ctx.options = replace(self.ctx.options, shell_default_timeout=45)
+        default = shell.shell.invoke({"command": "true"})
+        self.assertEqual(_field(default, "timeout_seconds"), "45")
+        requested = shell.shell.invoke({"command": "true", "timeout": 900})
+        self.assertEqual(_field(requested, "timeout_seconds"), "900")
+        self.ctx.options = replace(self.ctx.options, shell_max_timeout=0.15)
+        limited = shell.shell.invoke({"command": "printf partial; sleep 30", "timeout": 900})
+        self.assertEqual(_field(limited, "status"), "timeout")
+        self.assertEqual(_field(limited, "timeout_seconds"), "0.15")
+        self.assertEqual(_field(limited, "timeout_reason"), "host_limit")
+        self.assertIn("partial", Path(_field(limited, "log_path")).read_text())
+
+    def test_deadline_limits_commands_and_prevents_expired_launch(self) -> None:
+        self.ctx.shell_deadline = time.monotonic() + 0.2
+        result = shell.shell.invoke({"command": "sleep 30", "timeout": 900})
+        self.assertEqual(_field(result, "status"), "timeout")
+        self.assertEqual(_field(result, "timeout_reason"), "deadline")
+        self.assertLess(float(_field(result, "timeout_seconds")), 0.21)
+        with patch.object(subprocess, "Popen") as spawn:
+            result = shell.shell.invoke({"command": "touch should-not-exist"})
+            spawn.assert_not_called()
+        self.assertEqual(_field(result, "status"), "timeout")
+        self.assertFalse((self.root / "should-not-exist").exists())
+
+    def test_invalid_timeouts_are_errors_without_launch(self) -> None:
+        for value in (0, -1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                result = shell._shell_run("touch should-not-exist", timeout=value)
+                self.assertEqual(_field(result, "status"), "error")
+        self.assertFalse((self.root / "should-not-exist").exists())
 
     def test_background_job_uses_bash_and_can_be_read(self) -> None:
         started = shell.shell.invoke({"action": "start", "command": "[[ 1 -eq 1 ]] && echo ok", "name": "bash-syntax"})
@@ -179,50 +250,59 @@ class ShellToolTests(SessionContextTestMixin, unittest.TestCase):
         self.assertEqual(_field(killed, "status"), "killed")
         self.assertEqual(_field(read, "status"), "killed")
 
-    def test_shell_kill_escalates_after_process_table_loss(self) -> None:
+    def test_shell_kill_escalates_for_uncooperative_process(self) -> None:
         started = shell.shell.invoke(
             {
                 "action": "start",
-                "command": (
-                    "python -c 'import pathlib,signal,time; "
+                "command": _python_command(
+                    "import pathlib,signal,time; "
                     "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                     "pathlib.Path(\"ready.pid\").write_text(\"1\"); "
-                    "time.sleep(30)'"
+                    "time.sleep(30)"
                 ),
             }
         )
         job_id = _field(started, "job_id")
         self._wait_for_path(self.root / "ready.pid")
-        jobs = shell._load_jobs(_shell_dir())
-        pgid = shell._optional_int(jobs[job_id].get("pgid"))
+        manager = self.ctx.get_shell_process_manager()
+        pgid = manager.get(job_id)["pgid"]
         self.assertIsNotNone(pgid)
-        lost_procs = list(shell._job_processes.values())
-        shell._job_processes.clear()
-
         killed = shell.shell.invoke({"action": "kill", "job_id": job_id})
-        for proc in lost_procs:
-            proc.wait(timeout=1)
 
         self.assertEqual(_field(killed, "status"), "killed")
-        self.assertFalse(shell._process_group_alive(pgid))
+        self.assertFalse(_process_group_alive(pgid))
 
-    def test_refresh_keeps_lost_process_table_job_running_when_group_exists(self) -> None:
-        started = shell.shell.invoke({"action": "start", "command": "sleep 10"})
+    def test_background_jobs_work_with_external_runtime_directory(self) -> None:
+        external = self.root / "logs" / "agent" / "ness"
+        project = self.root / "app"
+        project.mkdir()
+        self.ctx.project_root = project
+        self.ctx.permissions.project_root = project
+        self.ctx.ness_dir = external
+        started = shell.shell.invoke({"action": "start", "command": "echo external; sleep 10"})
         job_id = _field(started, "job_id")
-        jobs = shell._load_jobs(_shell_dir())
-        pgid = shell._optional_int(jobs[job_id].get("pgid"))
-        self.assertIsNotNone(pgid)
-        lost_procs = list(shell._job_processes.values())
-        shell._job_processes.clear()
-
-        read = shell.shell.invoke({"action": "read", "job_id": job_id})
-        killed = shell.shell.invoke({"action": "kill", "job_id": job_id, "force": True})
-        for proc in lost_procs:
-            proc.wait(timeout=1)
-
-        self.assertEqual(_field(read, "status"), "running")
+        try:
+            self.assertEqual(_field(started, "status"), "running")
+            manager = self.ctx.get_shell_process_manager()
+            self.assertTrue(Path(manager.get(job_id)["log_path"]).is_relative_to(external))
+            self.assertIn(job_id, shell.shell.invoke({"action": "jobs"}))
+            read = shell.shell.invoke({"action": "read", "job_id": job_id})
+            self.assertEqual(_field(read, "status"), "running")
+            with self.assertRaises(PermissionError):
+                self.ctx.permissions.validate_path(str(external / "outside.txt"))
+        finally:
+            killed = shell.shell.invoke({"action": "kill", "job_id": job_id})
         self.assertEqual(_field(killed, "status"), "killed")
-        self.assertFalse(shell._process_group_alive(pgid))
+
+    def test_background_job_reports_exit_code_and_bounded_output(self) -> None:
+        started = shell.shell.invoke({"action": "start", "command": "printf abcdef; exit 7"})
+        job_id = _field(started, "job_id")
+        self._wait_for_job(job_id)
+        read = shell.shell.invoke({"action": "read", "job_id": job_id, "tail_chars": 3})
+        self.assertEqual(_field(read, "status"), "failed")
+        self.assertEqual(_field(read, "exit_code"), "7")
+        self.assertEqual(_field(read, "output_truncated"), "true")
+        self.assertTrue(read.endswith("def"))
 
     def _wait_for_job(self, job_id: str) -> str:
         deadline = time.time() + 5

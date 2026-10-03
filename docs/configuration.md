@@ -22,6 +22,7 @@ plans/<project-slug>/    Saved plan-mode output for this project
 
 # Per-project cache (platformdirs user_cache_dir("ness-agent")/<hash>/)
 cli_history              Prompt history for this project root
+images/                  Normalized PNG scratch copies of pasted images
 
 # Per-project .ness/ (NESS_DIR, default ".ness")
 .ness/
@@ -31,7 +32,6 @@ cli_history              Prompt history for this project root
 ├── mcp.json             Trusted stdio / Streamable HTTP MCP servers
 ├── agents/              Subagent definitions
 ├── commands/            User slash commands
-├── skills/              Project-local SKILL.md skills (highest precedence)
 ├── threads/             Saved session trajectories (SQLite)
 │   └── threads.db
 └── runtime/
@@ -39,14 +39,25 @@ cli_history              Prompt history for this project root
     │   └── mem_<thread_id>.md
     └── shells/          Background shell job metadata and logs
 
-# Also discovered by the Ness CLI when present (after .ness/skills; project before global)
+# Skills discovered when present (project before global, .agents first in each scope)
 .agents/skills/  .claude/skills/  .codex/skills/  .cursor/skills/
-~/.agents/skills/
+~/.agents/skills/  ~/.claude/skills/  ~/.codex/skills/  ~/.cursor/skills/
 ```
 
 Override roots with `NESS_AGENT_CONFIG_DIR`, `NESS_AGENT_CACHE_DIR`, and `NESS_DIR`. Skills may be nested under category folders (`category/skill/SKILL.md`); see [Skills in the CLI guide](cli.md#skills).
 
-Well-known-root discovery is Ness CLI policy: the CLI hands these directories to the SDK explicitly. SDK applications scan only the roots they configure (`skills_dir` / `skills_dirs`) and can opt into the same list via `merge_skill_dirs()` — see [SDK guide → Skills](sdk.md#skills).
+Pasted image scratch files live in `<cache-root>/<project-hash>/images/`.
+`NESS_AGENT_CACHE_DIR` overrides the cache root; without it, Ness uses the
+platform's `user_cache_dir("ness-agent")`. The TUI uses the paths resolved at
+startup, even if the working directory or environment later changes.
+Ness does not expire or delete these files automatically. You can delete the
+`images/` directory manually without affecting staged images or saved
+conversations, which keep the image data separately. Older shared scratch
+files under `<platform-cache-root>/images/` are not moved or removed.
+
+The CLI discovers the shared skill roots above and does not create skill directories during setup or `/init`. `.ness/skills` is no longer discovered and has no automatic migration.
+
+Well-known-root discovery is Ness CLI policy: the CLI hands these directories to the SDK explicitly. SDK applications scan only the roots they configure (`skills_dir` / `skills_dirs`) and can opt into the same list via `default_skill_search_dirs()` or add a custom root with `merge_skill_dirs()`. See [SDK guide → Skills](sdk.md#skills).
 
 ---
 
@@ -60,6 +71,25 @@ Settings resolve in this order (highest wins):
 4. Built-in defaults
 
 `configs.json` is written lazily — it only contains values you changed via `/config` (defaults stay in code and evolve with upgrades).
+
+Each save merges the requested changes into the latest documents under their
+file locks and validates the result before writing either file. Changes to
+other settings from another Ness process are preserved. Running settings and
+selected-session updates come from the committed documents, with the same CLI
+and environment precedence as startup.
+
+Configuration patches are validated before saving. Each file is replaced
+atomically, but a patch that changes both `configs.json` and `secrets.json` can
+save one file before the other fails. Ness keeps successful saves. After a
+write error, it reloads both files and reports which requested keys are saved
+and which are unsaved, without printing secret values. A value already present
+on disk counts as saved. You can retry the unsaved changes.
+
+The configuration manager and selected session use the verified saved values,
+with CLI and environment overrides still taking precedence. If the selected
+session cannot apply those values, the error reports that too. If the files
+cannot be read back or contain invalid settings, Ness reports an unknown save
+status and retains its last valid runtime configuration.
 
 MCP trust fingerprints and non-secret import provenance also live in `configs.json`. OAuth tokens and dynamic client registrations use the system keyring when available; `mcp_oauth.json` is an atomic project-scoped fallback and is never written when keyring storage succeeds.
 
@@ -80,11 +110,38 @@ Provider-specific model and reasoning choices are nested under
 `provider_profiles` in `configs.json`, so switching providers restores each
 provider's last selection. Legacy top-level OpenRouter settings remain valid.
 
+`--reasoning-effort` checks the selected provider's available model metadata.
+For example, OpenCode Go's `gpt-5.6-luna` accepts `none` and rejects `minimal`.
+Provider catalog entries override fallback options and context windows. Codex
+uses separate subscription defaults rather than API limits. Fallback matching
+distinguishes model versions, so an unfamiliar version cannot inherit an older
+version's limits. If selectable efforts are unavailable, Ness skips this CLI
+check. If a context window is unavailable, Ness leaves it unknown.
+
+Known API context windows, reasoning options, and vision support share one
+fallback record per model family in `providers/model_metadata.py`. Provider
+overrides keep OpenCode Go's supported effort choices and Codex subscription
+limits separate. Protocol selection and billing remain provider-specific.
+Eval bundle metadata stays separate from the runtime tables so a runtime
+cleanup does not change a historical evaluation.
+
 In the concurrent TUI, saved configuration is the default for new thread
 runtimes. Changing the model, provider, or reasoning effort through `/config`
 also rebuilds the currently selected thread, but it does not mutate sibling
 threads that are already live. Selecting one of those threads later restores
 its pinned runtime configuration.
+
+Thread autosave follows the same session policy. Changing `auto_save_threads`
+through `/config` updates the selected thread and the saved default for future
+threads. Other open threads keep their own autosave setting, including any
+turn already running. Their displayed settings match their persistence policy.
+The autosave control shows the selected thread's setting and can apply a value
+even when it already matches the saved default. Model reloads retain that
+thread's behavior settings. The threads share one SQLite database, with a
+separate autosave switch for each session. Turning autosave off skips new event
+and checkpoint writes for that session without deleting its saved history.
+Turning it back on resumes
+saving subsequent writes; it does not backfill turns run while autosave was off.
 
 ---
 
@@ -123,12 +180,18 @@ All except `NESS_DIR` are also editable via `/config` in the Ness TUI.
 
 Flags override env for a single run: `--model`, `--reflection-model`, `--api-key`, `--base-url`, `--openrouter-session-id`, `--reasoning-effort`, `--worktree` / `-w`, `--print` / `-p`, and `--yolo`.
 
-`--yolo` is session-only and bypasses approval prompts and persisted permission denials in act mode; hook vetoes and plan-mode read-only rules still apply.
+`--yolo` is session-only and bypasses approval prompts, permission denials, native file-tool project scope, and protected-write checks in act mode. OS permissions, hook vetoes, and plan-mode read-only rules still apply. Normal-mode native file tools ask for approval before accessing outside-project paths. Once approval applies to that call; session and always decisions remember the approved path with separate read/write scope.
 
 Use `/login` for provider authentication and switching. Use `/config` for the
 active provider's model and reasoning settings, behavior, compaction, and
 advanced options; provider-only fields are hidden when they do not apply.
 
-The `/config` model picker reads the active provider's catalog. OpenRouter's
-global disk cache is reused for 24 hours with a packaged offline fallback;
+The `/config` model picker reads the active provider's catalog. OpenRouter uses
+its global disk cache or the packaged offline fallback without fetching data,
+even when the cache is stale. Refresh is explicit. Run
+`uv run python scripts/fetch_openrouter_models.py --refresh` to replace the
+cache; provider callers can request `models(refresh=True)` as well. Both force
+a refresh. A direct catalog `refresh()` without `force=True` uses the 24-hour
+TTL to skip a fresh cache. Failed refreshes retain the previous catalog.
+
 `codex app-server` handles ChatGPT authentication and credential management for the signed-in account. Ness performs model inference separately through its experimental ChatGPT-authenticated Codex Responses transport.

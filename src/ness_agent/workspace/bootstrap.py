@@ -11,7 +11,6 @@ from ness_agent.permissions import DEFAULT_RULES
 NESS_SUBDIRS = (
     "agents",
     "commands",
-    "skills",
     "threads",
     "runtime/sessions",
     "runtime/shells",
@@ -21,7 +20,7 @@ NESS_SUBDIRS = (
 def setup_ness_structure(ness_dir: Path) -> list[str]:
     """Create the standard project ``.ness/`` tree and default config files.
 
-    Creates directories (agents/commands/skills/threads/runtime/sessions|shells),
+    Creates directories (agents/commands/threads/runtime/sessions|shells),
     default ``permissions.json``, ``hooks.json``, and ``mcp.json``, seeds
     built-in subagent profiles under ``agents/`` when missing, and creates an
     empty ``NESS.md`` when missing. Existing files are never overwritten.

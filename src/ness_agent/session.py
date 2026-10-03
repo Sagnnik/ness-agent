@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import threading
 from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,7 @@ from ness_agent.graph.builder import build_graph
 from ness_agent.graph.helpers import _effective_conversation, _incremental_input_tokens
 from ness_agent.reflection import ReflectionResult
 from ness_agent.session_context import SessionContext, set_session_context, reset_session_context
+from ness_agent.tools.shell_processes import ProcessManager
 from ness_agent.tracing.semconv import (
     AGENT_MODE,
     COST_USD,
@@ -163,6 +167,7 @@ class Session:
         vision: bool | None = None,
         on_plan_turn: PlanTurnHandler | None = None,
         on_interrupt: InterruptHandler | None = None,
+        deadline: float | None = None,
         _config: Any | None = None,
     ):
         """Create a new interaction session bound to a single thread.
@@ -174,6 +179,8 @@ class Session:
             mode: Initial mode (``"act"`` or ``"plan"``).
             metadata: Arbitrary key-value pairs surfaced in the system prompt.
             git_available: Whether the project has a git repo.
+            deadline: Absolute ``time.monotonic()`` timestamp limiting foreground
+                shell commands; this does not impose a timeout on model requests.
             vision: Whether image attachments should be forwarded to the model.
 
                 * ``None`` — caller-built :class:`HumanMessage` content is
@@ -202,11 +209,25 @@ class Session:
         self.thread_id = thread_id
         self.mode = mode
         self.metadata = dict(metadata or {})
+        if deadline is not None and (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+        ):
+            raise ValueError("deadline must be a finite time.monotonic() timestamp")
+        self.deadline = deadline
+        self._shell_cancel_event = threading.Event()
         self.git_available = git_available
         self._cfg = _config or agent.config.fork_for_session()
+        project_root = (self._cfg.options.project_root or Path.cwd()).resolve()
+        ness_dir = (self._cfg.options.ness_dir or project_root / ".ness").resolve()
+        self._shell_process_manager = ProcessManager(
+            project_root=project_root, runtime_root=ness_dir / "runtime" / "shells"
+        )
+        self._closed = False
         self._force_compact = False
         self._pending_act_checkpoint = False
-        self._pending_skills: list[str] = []
+        self._requested_skills: list[str] = []
         self.turn_count = 0
         self.context_used = 0
         self.context_total = 0
@@ -218,6 +239,7 @@ class Session:
             self._cfg.checkpoint_factory() if self._cfg.checkpoint_factory else MemorySaver()
         )
         self._skill_loader = self._cfg.skill_loader
+        self._skill_catalog_pending = not self._cfg.prompts.config.include_skill_catalog
 
         _ensure_config_event_bridges(self._cfg)
 
@@ -271,8 +293,11 @@ class Session:
                 ness_dir=ness_dir,
                 project_root=project_root,
                 agent_config=cfg,
-                all_skills=self._skill_loader.load(),
+                available_skills=self._skill_loader.load(),
                 vision=self._vision,
+                shell_process_manager=self._shell_process_manager,
+                shell_cancel_event=self._shell_cancel_event,
+                shell_deadline=self.deadline,
             )
         )
 
@@ -290,6 +315,12 @@ class Session:
     def app(self):
         """The compiled langgraph application for this session."""
         return self._app
+
+    async def close(self) -> None:
+        """Close this session's shell runtime and stop all owned process groups."""
+        self._closed = True
+        self.cancel()
+        await asyncio.to_thread(self._shell_process_manager.close)
 
     @property
     def config(self):
@@ -353,7 +384,7 @@ class Session:
         self._pending_bootstrap = list(messages)
 
     def cancel(self) -> None:
-        """Request a cooperative break-out of the active turn's stream loop.
+        """Request a cooperative interruption and stop active foreground shells.
 
         ``_iter_events`` polls ``is_cancelled()`` between yields and, on a set
         token, performs partial-state cleanup via
@@ -362,6 +393,7 @@ class Session:
         ``CancelledError`` and is handled by the same finaliser, shielded.
         """
         self._cancel_token.set()
+        self._shell_cancel_event.set()
 
     def is_cancelled(self) -> bool:
         """Whether :meth:`cancel` was requested for the active turn."""
@@ -393,17 +425,19 @@ class Session:
         """Set this session's persistent display name."""
         return self._cfg.thread_store.set_thread_name(self.thread_id, name)
 
-    def active_skills(self, names: Sequence[str]) -> None:
+    def requested_skills(self, names: Sequence[str]) -> None:
         """Replace the pending skill list for the next turn (replace-all)."""
-        self._pending_skills = list(names)
+        self._requested_skills = list(names)
+
+    active_skills = requested_skills  # Compatibility with existing SDK callers.
 
     def stage_skills(self, names: Sequence[str]) -> None:
         """Append skill names to the pending list.
 
-        Used by CLI ``/skill`` so multiple stages before one turn accumulate.
-        Consumed by :meth:`_build_run_payload` when ``active_skills=`` is omitted.
+        Multiple calls before one turn accumulate requests.
+        Consumed by :meth:`_build_run_payload` when ``requested_skills=`` is omitted.
         """
-        pending = list(self._pending_skills)
+        pending = list(self._requested_skills)
         seen = set(pending)
         for name in names:
             n = str(name).strip()
@@ -411,7 +445,36 @@ class Session:
                 continue
             pending.append(n)
             seen.add(n)
-        self._pending_skills = pending
+        self._requested_skills = pending
+
+    def configure_skills(
+        self,
+        skills: Sequence[dict[str, Any]],
+        *,
+        disabled_skill_ids: Sequence[str] = (),
+    ) -> None:
+        """Install a thread-owned skill snapshot and refresh its L3 catalog."""
+        self._skill_loader.set_snapshot(
+            skills,
+            disabled_skill_ids=disabled_skill_ids,
+        )
+        self.refresh_skill_catalog()
+
+    def set_skill_access(self, disabled_skill_ids: Sequence[str]) -> None:
+        """Update this thread's access map and refresh its L3 catalog."""
+        self._skill_loader.set_disabled_skills(disabled_skill_ids)
+        self.refresh_skill_catalog()
+
+    def refresh_skill_catalog(self) -> None:
+        """Send the complete current catalog through L3 on the next model call."""
+        if not self._cfg.prompts.config.include_skill_catalog:
+            self._skill_catalog_pending = True
+
+    def _consume_skill_catalog(self) -> str:
+        if not self._skill_catalog_pending:
+            return ""
+        self._skill_catalog_pending = False
+        return self._skill_loader.render_current_catalog()
 
     def request_compact(self) -> None:
         """Requests a compaction of the session."""
@@ -498,7 +561,6 @@ class Session:
         if not conversation:
             conversation = list(_effective_conversation(state.get("messages", []), state))
 
-        model_name = getattr(cfg.model, "model", "") or getattr(cfg.model, "model_name", "")
         compaction_note = ""
         if pressure is not None:
             compaction_note = pressure_note(
@@ -523,6 +585,7 @@ class Session:
         overlay_sections: dict[str, str] = {}
         overlay_provider = cfg.overlay
         if overlay_provider is not None:
+            available_skills = self._skill_loader.load()
             overlay_ctx = OverlayContext(
                 thread_id=self.thread_id,
                 mode=preview_mode,
@@ -536,8 +599,11 @@ class Session:
                 metadata=self.metadata,
                 git_snapshot=git_snapshot,
                 git_available=bool(git_flag),
-                activate_skills=list(self._pending_skills),
-                loaded_skills=list(state.get("loaded_skills", [])),
+                requested_skills=[name for name in self._requested_skills if name in available_skills],
+                skill_catalog=(
+                    self._skill_loader.render_current_catalog()
+                    if self._skill_catalog_pending else ""
+                ),
             )
             overlay_sections = {
                 name: text
@@ -609,13 +675,13 @@ class Session:
         tools_reg.sync()
         memory = cfg.memory_store
         skills_loader = cfg.skill_loader
-        all_skills = skills_loader.load()
+        available_skills = skills_loader.load()
         available = self.git_available is True if git_available is None else git_available
         return SystemMessage(content=cfg.prompts.build_stable_prefix(
             tools_reg.active_tools,
             user_memory=memory.load_user() if not memory.disabled else "",
             project_memory=memory.load_project() if not memory.disabled else "",
-            skill_catalog=skills_loader.render_catalog(all_skills),
+            skill_catalog=skills_loader.render_catalog(available_skills),
             git_available=available,
             metadata=self.metadata,
             tool_catalog_groups=[
@@ -705,7 +771,7 @@ class Session:
         self,
         user_message: HumanMessage,
         *,
-        active_skills: Sequence[str] | None,
+        requested_skills: Sequence[str] | None,
         mode_switch: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Build the turn payload and run config.
@@ -714,18 +780,20 @@ class Session:
         :meth:`_user_message`). Any pending bootstrap messages are prepended
         to the payload's ``messages`` and consumed once here.
         """
-        skills = list(active_skills if active_skills is not None else self._pending_skills)
-        if active_skills is None:
-            self._pending_skills = []
+        skills = list(requested_skills if requested_skills is not None else self._requested_skills)
+        if requested_skills is None:
+            self._requested_skills = []
         initial = list(self._pending_bootstrap)
         if initial:
             self._pending_bootstrap = []
         payload = {
             "messages": [*initial, user_message],
             "approval_declined": {},
+            "approval_file_access": {},
             "mode": self.mode,
             "force_compact": self._consume_force_compact(),
-            "activate_skills": skills,
+            "requested_skills": skills,
+            "skill_catalog": self._consume_skill_catalog(),
             "mode_switch": mode_switch,
         }
         cfg = {"configurable": {"thread_id": self.thread_id}, "recursion_limit": self._cfg.options.recursion_limit}
@@ -799,7 +867,7 @@ class Session:
             return out
 
         # handle the on_end_chain event that emits tool_end or the end of tools node
-        if ek == "on_chain_end" and name == "tools":
+        if ek == "on_chain_end" and name in {"tools", "approval_gate"}:
             for msg in _messages_from_event(ev):
                 if getattr(msg, "type", None) != "tool" and not isinstance(msg, ToolMessage):
                     continue
@@ -910,12 +978,16 @@ class Session:
         message: str,
         *,
         images: Sequence[str] | None = None,
-        active_skills: Sequence[str] | None = None,
+        requested_skills: Sequence[str] | None = None,
         mode: str | None = None,
     ) -> AsyncIterator[tuple[SessionEvent, str]]:
         """Yield (event, assistant_text_so_far) pairs from the graph stream."""
 
+        if self._closed:
+            raise RuntimeError("Session is closed.")
+
         # sets up a runtime context for this session
+        self._shell_cancel_event = threading.Event()
         ctx_token = self._install_session_runtime()
         # reset per-turn usage (last call + turn aggregate)
         self._last_usage = None
@@ -966,7 +1038,7 @@ class Session:
                 try:
                     payload, cfg_payload = await self._build_run_payload(
                         user_message,
-                        active_skills=active_skills,
+                        requested_skills=requested_skills,
                         mode_switch=mode_switch,
                     )
                     cfg = cfg_payload
@@ -1007,6 +1079,7 @@ class Session:
                     for queued in self._drain_queue():
                         yield queued, assistant_text
                 except asyncio.CancelledError:
+                    self.cancel()
                     # Hard-escalation path: the cooperative cancel token failed
                     # to break the stream loop within the backstop window.
                     # Best-effort finalisation before re-raising so the task is
@@ -1052,6 +1125,9 @@ class Session:
                         else:
                             yield SessionEvent("plan_turn", {"text": assistant_text}), assistant_text
             finally:
+                # A stream abandoned by its consumer must also stop foreground
+                # worker threads. Each turn has its own event, never reset.
+                self._shell_cancel_event.set()
                 # Restore the session mode when a one-turn override was applied
                 # (see ``mode`` kwarg docstring). Direct assignment avoids
                 # ``set_mode``'s plan->act checkpoint side effect.
@@ -1072,6 +1148,7 @@ class Session:
         message: str,
         *,
         images: Sequence[str] | None = None,
+        requested_skills: Sequence[str] | None = None,
         active_skills: Sequence[str] | None = None,
         mode: str | None = None,
     ) -> RunResult:
@@ -1084,14 +1161,17 @@ class Session:
         Args:
             message: The user message text.
             images: Optional list of image URLs to attach.
-            active_skills: Skill names to activate this turn.
+            requested_skills: Skill names to request this turn.
+            active_skills: Compatibility spelling, used when requested_skills is omitted.
             mode: Override the session mode for this turn only.
         """
         events: list[SessionEvent] = []
         assistant_text = ""
         
         async for event, assistant_text in self._iter_events(
-            message, images=images, active_skills=active_skills, mode=mode
+            message, images=images,
+            requested_skills=requested_skills if requested_skills is not None else active_skills,
+            mode=mode,
         ):
             events.append(event)
         
@@ -1110,6 +1190,7 @@ class Session:
         message: str,
         *,
         images: Sequence[str] | None = None,
+        requested_skills: Sequence[str] | None = None,
         active_skills: Sequence[str] | None = None,
         mode: str | None = None,
     ) -> AsyncIterator[SessionEvent]:
@@ -1123,12 +1204,16 @@ class Session:
         Args:
             message: The user message text.
             images: Optional list of image URLs to attach.
-            active_skills: Skill names to activate this turn.
+            requested_skills: Skill names to request this turn.
+            active_skills: Compatibility spelling, used when requested_skills is omitted.
             mode: Override the session mode for this turn only.
         """
-        async for event, _ in self._iter_events(
-            message, images=images, active_skills=active_skills, mode=mode
-        ):
-            yield event
+        async with aclosing(self._iter_events(
+            message, images=images,
+            requested_skills=requested_skills if requested_skills is not None else active_skills,
+            mode=mode,
+        )) as events:
+            async for event, _ in events:
+                yield event
         self.turn_count += 1
         await self.refresh_context_snapshot()

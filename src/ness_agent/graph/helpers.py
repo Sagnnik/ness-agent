@@ -220,15 +220,15 @@ def _split_active_turn_safely(
 
 def _needs_approval(name, args, options, permission_store, tools_reg: ToolRegistry) -> bool:
     """Decide whether to ask the user for approval before running a tool."""
-    if not options.enable_approval: 
+    if not options.enable_approval or getattr(options, "yolo_mode", False):
         return False
 
     d = permission_store.check(name, args)
     if d in ("allow", "deny"): 
         return False
     
-    # check if the tool is destructive
-    return tools_reg.is_destructive(name, args)
+    # Outside-project reads also need approval despite being nondestructive.
+    return bool(permission_store.file_access_requests(name, args)) or tools_reg.is_destructive(name, args)
 
 def _denial_tool_messages(
     calls: list[tuple[str, dict[str, Any], str]],
@@ -236,7 +236,7 @@ def _denial_tool_messages(
 ) -> list[ToolMessage]:
     """Build ToolMessages for call_ids present in ``denials``."""
     return [
-        ToolMessage(tool_call_id=call_id, name=name, content=denials[call_id])
+        ToolMessage(tool_call_id=call_id, name=name, content=denials[call_id], additional_kwargs={"duration_ms": 0})
         for name, _, call_id in calls
         if call_id in denials
     ]

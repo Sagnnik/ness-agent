@@ -1,7 +1,16 @@
+"""Frozen Codex eval adapter for the released ness-agent 0.2.4 package.
+
+Conversion behavior, API-equivalent pricing, and context windows belong to this
+eval snapshot. Do not replace them with imports from the moving CLI adapter.
+Changing the package pin requires a new reviewed eval snapshot and regression
+checks; runtime cleanups do not update this historical copy.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -11,8 +20,42 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from ness_cli.provider.codex.auth import CodexAuth
-from ness_cli.provider.codex.transport import CodexResponsesTransport
+EVAL_NESS_VERSION = "0.2.4"
+EVAL_ADAPTER_REVISION = "ness-agent-0.2.4-codex-eval-v1"
+
+
+def eval_provider_types() -> tuple[type[Any], type[Any]]:
+    """Load the released provider only after checking the eval package pin.
+
+    Imports are deferred so Harbor can read the pin on the host, whose SDK may
+    differ from the separately installed sandbox package.
+    """
+    try:
+        installed = version("ness-agent")
+    except PackageNotFoundError as exc:
+        raise RuntimeError(
+            f"{EVAL_ADAPTER_REVISION} requires ness-agent=={EVAL_NESS_VERSION}; "
+            "the package is not installed"
+        ) from exc
+    if installed != EVAL_NESS_VERSION:
+        raise RuntimeError(
+            f"{EVAL_ADAPTER_REVISION} requires ness-agent=={EVAL_NESS_VERSION}; "
+            f"found {installed}. Use the pinned release for this eval snapshot."
+        )
+    try:
+        from ness_cli.provider.codex.auth import CodexAuth
+        from ness_cli.provider.codex.transport import CodexResponsesTransport
+    except ModuleNotFoundError as exc:
+        if exc.name and (
+            exc.name == "ness_cli" or exc.name.startswith("ness_cli.provider")
+        ):
+            raise RuntimeError(
+                f"{EVAL_ADAPTER_REVISION} requires the released "
+                f"ness-agent=={EVAL_NESS_VERSION} provider layout; "
+                "this checkout or package has an incompatible CLI layout."
+            ) from exc
+        raise
+    return CodexAuth, CodexResponsesTransport
 
 
 CODEX_API_PRICING: dict[str, dict[str, float]] = {
@@ -128,12 +171,13 @@ class CodexChatModel(BaseChatModel):
     reasoning_effort: str | None = None
     prompt_cache_key: str | None = None
     max_retries: int = 3
-    _auth: CodexAuth = PrivateAttr()
-    _transport: CodexResponsesTransport = PrivateAttr()
+    _auth: Any = PrivateAttr()
+    _transport: Any = PrivateAttr()
     _tool_registry: Any = PrivateAttr(default=None)
     _tool_snapshot: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
-    def __init__(self, *, auth: CodexAuth | None = None, **data: Any) -> None:
+    def __init__(self, *, auth: Any = None, **data: Any) -> None:
+        CodexAuth, CodexResponsesTransport = eval_provider_types()
         super().__init__(**data)
         self._auth = auth or CodexAuth()
         self._transport = CodexResponsesTransport(self._auth, max_retries=self.max_retries)

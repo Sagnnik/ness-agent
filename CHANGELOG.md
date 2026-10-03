@@ -7,9 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Retained foreground shell logs with paginated reads, active-shell cancellation, configurable shell timeouts, and host-provided monotonic shell deadlines.
+- Normal-mode approval for outside-project native file access, with once, session, and always decisions and separate read/write scope.
+
+- Session-owned background shell process managers and `await Session.close()` for cleanup. Job logs and diagnostic metadata are stored in separate job directories under the configured Ness runtime directory.
+- CLI skill selection with `$`: typing opens a filtered skill list, Up/Down highlights a skill, and Tab inserts its name and requests it for that prompt. Enter sends the prompt; an unselected `$` remains literal text. Selections stay with queued prompts.
+- `/skill` now provides a searchable availability checklist and skill details. Defaults are stored in global `skill-state.json`, with isolated snapshots and availability choices for each thread. Exact copies of a skill bundle share one logical identity.
+- SDK skill configuration through `Session.configure_skills()`, `set_skill_access()`, and `refresh_skill_catalog()`. `requested_skills` is the canonical request name; `active_skills()` and the `active_skills=` turn argument remain compatibility aliases.
+
 ### Changed
 
+- YOLO now bypasses native file-tool project scope and protected-write checks, in addition to approvals and deny rules. OS permissions still apply.
+
+- Foreground shell timeouts accept positive finite seconds, report effective limits, and no longer silently clamp to 600 seconds. Omitted timeouts use the configurable 30-second default; hosts can set an optional maximum.
+
+- **Breaking:** background shell jobs belong to one live session. Closing the session stops its process groups; SDK hosts must close sessions, and the CLI does this automatically. Jobs are no longer restored from the shared `jobs.json` registry after a restart. The shell tool's action arguments remain unchanged.
 - **Breaking:** the `delete` tool now requires a `paths` list and deletes the listed files in one call. It no longer accepts the singular `path` argument.
+- Replaced the CLI's process-global configuration, provider, and rendering facades with owned runtime services, thread sessions, and a prompt-toolkit controller. Interactive and headless execution share runtime construction; the `ness` entry point is now `ness_cli.main:main`.
+- The CLI sends skill catalogs through L3 on the first turn, after availability changes, and after compaction, keeping availability edits out of the stable system prefix. Full skill instructions remain tool messages; compaction adds a general reminder to reload instructions when needed.
+- **Breaking:** CLI skill discovery now prioritizes project `.agents/skills`, then other supported project roots, then user-global roots. `.claude/skills`, `.codex/skills`, and `.cursor/skills` remain supported in both scopes. `.ness/skills` is no longer discovered or created by bootstrap or `/init`; there is no automatic migration.
+- **Breaking:** `/skill <name>` is replaced by selection through `$` in the prompt. The SDK no longer tracks loaded-skill summaries; `OverlayContext` uses `requested_skills` and `skill_catalog`, retains a read-only `activate_skills` alias, and removes `loaded_skills`.
+- CI and tag publishing run the same source, offline-test, and clean-install checks. Publishing uses the verified wheel and source distribution from that check without rebuilding them.
+
+### Fixed
+
+- Eval runners use async question callbacks, so headless auto-answers satisfy the SDK's awaitable handler contract.
+- Background shells work when `ness_dir` is outside the project. Runtime paths no longer use project-file validation or project-relative serialization. Failed job registration stops the launched process, concurrent starts preserve every job, and cleanup reaches children whose command shell has already exited.
+- Rollback checkpoints use immutable Git tree IDs. Restores preserve the user's staged changes and unrelated files, remove files created by recorded tool mutations, and preserve durable history when restoration or replay fails.
+- Autosave policy is isolated per session while persistence views share their database and writer lock. New sessions inherit current CLI settings; existing siblings retain their effective settings.
+- Turn finalization attempts plan saving and mutation bookkeeping independently. Shutdown attempts every owned cleanup, preserves original errors and cancellation, and reports cleanup failures.
+- Failed streamed turns stop queued execution and goal judging. Goal completion clears cancellation timers so an old timer cannot cancel a later turn.
+- Concurrent configuration updates resolve runtime state from locked persisted documents. Partial config/secret saves report what reached disk and refresh the selected session accordingly; zero and false values remain valid settings.
+- Provider changes refresh fallback pricing and use provider-specific reasoning capabilities. Specific model pricing now takes precedence over matching family prefixes regardless of insertion order.
+- Malformed saved skill records no longer prevent opening valid threads. Child agents retain skill catalogs, and context previews include pending catalog updates without consuming them.
+- File completion includes untracked project files. Clipboard image paths are opened correctly, scratch files respect the project cache override, and terminal layout accounts for Unicode cell widths.
+- The OpenRouter catalog refresh script uses the active provider package and reports failed refreshes with a nonzero exit code.
 
 ## [0.2.4] - 2026-09-08 — Released
 
