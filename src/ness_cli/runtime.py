@@ -227,10 +227,15 @@ class _SessionFactory:
         return session
 
     async def resume(self, thread_id: str) -> CodingSession:
+        # Session construction persists a skill snapshot. Reject missing threads
+        # before creating any session-owned resources or state.
+        if not SessionRepository(self._agent.config.thread_store).exists(thread_id):
+            raise LookupError(thread_id)
         session = await self.new(thread_id=thread_id)
         if not await session.resume():
             self._sessions.pop(thread_id, None)
-            raise LookupError(thread_id)
+            async with cleanup_on_exit(f"session {thread_id}", session.close):
+                raise LookupError(thread_id)
         return session
 
     async def close(self) -> None:

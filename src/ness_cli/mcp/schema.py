@@ -5,6 +5,7 @@ to the caller: imports retain placeholders, while connections require resolved
 HTTP URLs. Credential warnings and expansion also belong to the caller.
 """
 
+import math
 from typing import Any
 
 from ness_agent.mcp import DEFAULT_STARTUP_TIMEOUT
@@ -33,12 +34,17 @@ def validate_server_structure(value: Any) -> tuple[str, list[str]]:
     if not isinstance(value.get("description", ""), str):
         errors.append("description must be a string")
     timeout = value.get("startup_timeout", DEFAULT_STARTUP_TIMEOUT)
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or timeout <= 0
-    ):
-        errors.append("startup_timeout must be a positive number")
+    try:
+        valid_timeout = (
+            not isinstance(timeout, bool)
+            and isinstance(timeout, (int, float))
+            and math.isfinite(timeout)
+            and timeout > 0
+        )
+    except OverflowError:
+        valid_timeout = False
+    if not valid_timeout:
+        errors.append("startup_timeout must be a positive finite number")
     if transport == "stdio":
         if not has_command or has_url:
             errors.append("stdio server requires command and cannot contain url")

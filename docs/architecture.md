@@ -18,7 +18,7 @@ Ness Agent is split into a reusable **SDK** and a **coding CLI adapter** (Ness).
 
 See also: [SDK guide](sdk.md) · [CLI guide](cli.md) · [Configuration](configuration.md)
 
-The [current CLI cutover record](cli-cutover.md) identifies the active package and remaining release checks. `ness_agent` is the application SDK. `ness_cli` runtime and session modules are internal CLI implementation APIs and may change with the CLI.
+`ness_agent` is the application SDK. `ness_cli` runtime and session modules are internal CLI implementation APIs and may change with the CLI.
 
 ### Runtime ownership
 

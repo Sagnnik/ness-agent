@@ -105,6 +105,11 @@ class CodingSession:
             mutations=(
                 WorkspaceMutations.attach(
                     session.config.hook_runner, paths.project_root, repository,
+                    ignored_exclusions=(
+                        paths.threads_dir,
+                        paths.shells_dir,
+                        paths.sessions_dir,
+                    ),
                 )
                 if getattr(session.config, "hook_runner", None) is not None
                 else None

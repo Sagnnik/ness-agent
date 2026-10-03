@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from typer.testing import CliRunner
@@ -204,6 +205,86 @@ def build_behavior_runtime(isolated_cli_env, monkeypatch):
         return manager, agent, factory
 
     return build
+
+
+@pytest.fixture
+def resume_factory(build_behavior_runtime):
+    _, agent, factory = build_behavior_runtime(
+        {"compaction_buffer_tokens": 4096, "compaction_summary_max_tokens": 1024},
+        runtime.InteractiveOptions(),
+    )
+    return agent, factory
+
+
+def test_missing_resumes_do_not_create_sessions_or_skill_snapshots(
+    resume_factory, isolated_cli_env, monkeypatch
+):
+    agent, factory = resume_factory
+
+    async def exercise():
+        existing = await factory.new(thread_id="existing")
+        state_file = isolated_cli_env.paths.skill_state_file
+        before = state_file.read_bytes()
+        create_session = Mock(wraps=agent.session)
+        monkeypatch.setattr(agent, "session", create_session)
+
+        for thread_id in ("missing-one", "missing-two", "missing-one"):
+            with pytest.raises(LookupError) as raised:
+                await factory.resume(thread_id)
+            assert raised.value.args == (thread_id,)
+            assert not agent.config.thread_store.thread_exists(thread_id)
+            assert state_file.read_bytes() == before
+
+        create_session.assert_not_called()
+        assert factory._sessions == {"existing": existing}
+        await factory.close()
+        assert existing._session._closed
+
+    asyncio.run(exercise())
+
+
+def test_existing_thread_resumes_through_session_factory(resume_factory):
+    agent, factory = resume_factory
+    agent.config.thread_store.append_event(
+        "saved", {"kind": "user", "content": "previous prompt"}
+    )
+
+    async def exercise():
+        try:
+            resumed = await factory.resume("saved")
+            assert factory._sessions["saved"] is resumed
+            assert any(
+                message.content == "previous prompt"
+                for message in resumed._session._pending_bootstrap
+            )
+            assert not resumed._session._closed
+        finally:
+            await factory.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_rejected_resume_closes_and_removes_session(
+    resume_factory, cleanup_fails
+):
+    agent, factory = resume_factory
+    agent.config.thread_store.append_event(
+        "saved", {"kind": "user", "content": "previous prompt"}
+    )
+    session = SimpleNamespace(resume=AsyncMock(return_value=False), close=AsyncMock())
+    if cleanup_fails:
+        session.close.side_effect = RuntimeError("close failed")
+    factory._sessions["saved"] = session
+
+    with pytest.raises(LookupError) as raised:
+        asyncio.run(factory.resume("saved"))
+
+    assert raised.value.args == ("saved",)
+    session.close.assert_awaited_once()
+    assert not factory.has_sessions
+    if cleanup_fails:
+        assert any("close failed" in note for note in raised.value.__notes__)
 
 
 @pytest.mark.parametrize(

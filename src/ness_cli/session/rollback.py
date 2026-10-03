@@ -110,6 +110,33 @@ def create_file_checkpoint(cwd: Path) -> str | None:
 
 
 TreeEntry = tuple[str, str]
+IgnoredFileFingerprint = tuple[int, int, int, int]
+
+
+def ignored_file_fingerprints(
+    cwd: Path, *, excluded_paths: tuple[Path, ...] = ()
+) -> dict[str, IgnoredFileFingerprint]:
+    """Inspect ignored files without reading or storing their contents in Git."""
+    result = _run_git(
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], cwd=cwd
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "could not inspect ignored files")
+    fingerprints = {}
+    for raw_path in result.stdout.split("\0"):
+        if not raw_path:
+            continue
+        path, target = workspace_path(raw_path, cwd)
+        if any(target.is_relative_to(excluded) for excluded in excluded_paths):
+            continue
+        info = target.lstat()
+        fingerprints[path] = (
+            info.st_mode,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+    return fingerprints
 
 
 @dataclass(frozen=True, slots=True)

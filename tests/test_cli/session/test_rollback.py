@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -503,6 +504,58 @@ def test_ignored_file_tool_cannot_claim_a_complete_rollback(rollback_env):
     assert env.repository.raw_events(env.thread) == events
 
 
+@pytest.mark.parametrize("change", ["create", "modify", "delete", "nested-create"])
+def test_ignored_shell_changes_preserve_history_instead_of_claiming_rollback(
+    rollback_env, change
+):
+    env = rollback_env
+    (env.project / ".gitignore").write_text("ignored.txt\nignored-dir/\n")
+    ignored = env.project / "ignored.txt"
+    if change != "create":
+        ignored.write_text("preexisting ignored contents")
+    directory = env.project / "ignored-dir"
+    directory.mkdir()
+    (directory / "preexisting.txt").write_text("keep existing output")
+    seq = start_turn(env)
+    with tool_window(env):
+        (env.project / "app.txt").write_text("agent edit")
+        if change == "create":
+            ignored.write_text("new ignored contents")
+        elif change == "modify":
+            ignored.write_text("modified ignored contents")
+        elif change == "delete":
+            ignored.unlink()
+        else:
+            (directory / "new.txt").write_text("new ignored output")
+    env.service.record_mutations(env.thread, seq)
+    events = env.repository.raw_events(env.thread)
+    index = git(env.project, "ls-files", "--stage")
+    result = asyncio.run(env.service.rollback(env.thread, seq, replay=replay_ok))
+
+    assert not result.ok and "Ignored file" in result.message
+    assert "Git snapshot" in result.message
+    assert (env.project / "app.txt").read_text() == "agent edit"
+    assert (directory / "preexisting.txt").read_text() == "keep existing output"
+    assert env.repository.raw_events(env.thread) == events
+    assert env.repository.checkpoint(env.thread, seq) is not None
+    assert git(env.project, "ls-files", "--stage") == index
+
+
+def test_unchanged_ignored_files_do_not_block_shell_rollback(rollback_env):
+    env = rollback_env
+    (env.project / ".gitignore").write_text("ignored.txt\n")
+    ignored = env.project / "ignored.txt"
+    ignored.write_text("preexisting ignored contents")
+    seq = start_turn(env)
+    with tool_window(env):
+        (env.project / "app.txt").write_text("agent edit")
+    env.service.record_mutations(env.thread, seq)
+
+    assert asyncio.run(env.service.rollback(env.thread, seq, replay=replay_ok)).ok
+    assert ignored.read_text() == "preexisting ignored contents"
+    assert (env.project / "app.txt").read_text() == "committed contents\n"
+
+
 @pytest.mark.parametrize("path", ["../outside.txt", ".git/config"])
 def test_restore_rejects_paths_outside_the_workspace(committed_project, path):
     checkpoint = create_file_checkpoint(committed_project)
@@ -578,7 +631,11 @@ def test_autosave_disabled_during_replay_does_not_report_success(rollback_env):
     assert env.repository.checkpoint(env.thread, seq) is not None
 
 
-def test_cli_stream_records_shell_creation_and_rolls_it_back(isolated_cli_env):
+@pytest.mark.parametrize("ignored", [False, True])
+@pytest.mark.parametrize("runtime_in_project", [False, True])
+def test_cli_stream_records_shell_creation_and_rolls_it_back(
+    isolated_cli_env, ignored, runtime_in_project
+):
     from langchain_core.messages import AIMessage
     from ness_agent import NessAgent, NessAgentOptions, NoOverlay, PromptLayersConfig
     from ness_cli.config import ConfigManager
@@ -608,8 +665,24 @@ def test_cli_stream_records_shell_creation_and_rolls_it_back(isolated_cli_env):
             return AIMessage(content="Created the file.")
 
     paths = isolated_cli_env.paths
+    if runtime_in_project:
+        ness_dir = paths.project_root / ".ness"
+        paths = replace(
+            paths,
+            ness_dir=ness_dir,
+            threads_dir=ness_dir / "threads",
+            shells_dir=ness_dir / "runtime/shells",
+            sessions_dir=ness_dir / "runtime/sessions",
+        )
     git(paths.project_root, "init", "--quiet")
     (paths.project_root / "original.txt").write_text("original")
+    exclusions = []
+    if ignored:
+        exclusions.append("generated.txt")
+    if runtime_in_project:
+        exclusions.append(".ness/")
+    if exclusions:
+        (paths.project_root / ".gitignore").write_text("\n".join(exclusions) + "\n")
     git(paths.project_root, "add", ".")
     git(paths.project_root, "commit", "--quiet", "-m", "initial")
     agent = NessAgent(
@@ -648,10 +721,15 @@ def test_cli_stream_records_shell_creation_and_rolls_it_back(isolated_cli_env):
             for event in repository.events(coding.thread_id)
         )
         result = await coding.rollback_to(0)
-        assert result.ok, result.message
-        assert not (paths.project_root / "generated.txt").exists()
-        assert repository.raw_events(coding.thread_id) == []
-        assert await coding.get_messages() == []
+        if ignored:
+            assert not result.ok and "Ignored file" in result.message
+            assert (paths.project_root / "generated.txt").exists()
+            assert repository.raw_events(coding.thread_id)
+        else:
+            assert result.ok, result.message
+            assert not (paths.project_root / "generated.txt").exists()
+            assert repository.raw_events(coding.thread_id) == []
+            assert await coding.get_messages() == []
         await coding.close()
 
     asyncio.run(exercise())

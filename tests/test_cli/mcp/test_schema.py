@@ -115,6 +115,51 @@ def test_import_and_load_agree_on_invalid_structure(tmp_path, entry, message):
 
 
 @pytest.mark.parametrize(
+    "server",
+    [{"command": "python"}, {"url": "https://example.com/mcp"}],
+    ids=["stdio", "http"],
+)
+@pytest.mark.parametrize(
+    "raw_timeout",
+    ["1e999", "-1e999", "NaN", "Infinity", "-Infinity", "9" * 400],
+    ids=[
+        "overflow",
+        "negative-overflow",
+        "nan",
+        "infinity",
+        "negative-infinity",
+        "huge-int",
+    ],
+)
+def test_import_and_load_reject_nonfinite_startup_timeout(
+    tmp_path, server, raw_timeout
+):
+    document = json.dumps(
+        {
+            "mcpServers": {
+                "bad": {**server, "startup_timeout": "RAW_TIMEOUT"},
+                "good": {"command": "python"},
+            }
+        }
+    ).replace('"RAW_TIMEOUT"', raw_timeout)
+    entry = json.loads(document)["mcpServers"]["bad"]
+    errors, _ = validate_import_entry(entry)
+    assert errors == ["startup_timeout must be a positive finite number"]
+
+    source = tmp_path / "mcp.json"
+    source.write_text(document)
+    config = ProjectMCPConfig(source, project_root=tmp_path)
+    assert set(config.specs) == {"good"}
+    assert config.servers["bad"]["status"] == "error"
+    assert config.servers["bad"]["error"] == errors[0]
+
+    destination = tmp_path / "destination.json"
+    plan = plan_mcp_import(source, destination, project_root=tmp_path)
+    assert not plan.valid
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
     "entry",
     [
         {"type": "", "command": "python", "env": None, "headers": None},
@@ -125,6 +170,8 @@ def test_import_and_load_agree_on_invalid_structure(tmp_path, entry, message):
             "auth": {"CLIENT_ID": "id", "scopes": "read write"},
         },
         {"url": "https://example.com", "oauth": {}},
+        {"command": "python", "startup_timeout": 1},
+        {"url": "https://example.com", "startup_timeout": 0.125},
         *[
             {"url": "https://example.com", "oauth": {"tokenEndpointAuthMethod": method}}
             for method in ("none", "client_secret_post", "client_secret_basic")

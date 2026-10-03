@@ -10,7 +10,9 @@ from ness_agent import Hook, HookRunner
 
 from ness_cli.session.persistence import SessionRepository
 from ness_cli.session.rollback import (
+    IgnoredFileFingerprint,
     create_file_checkpoint,
+    ignored_file_fingerprints,
     mutated_paths,
     tree_entries,
     workspace_path,
@@ -24,6 +26,7 @@ class _PendingMutation:
     overlapping: bool = False
     start_seq: int | None = None
     error: str | None = None
+    before_ignored: dict[str, IgnoredFileFingerprint] | None = None
 
 
 class WorkspaceMutations:
@@ -34,9 +37,16 @@ class WorkspaceMutations:
     automatically. Later edits are protected by comparison with the final tree.
     """
 
-    def __init__(self, root: Path, repository: SessionRepository) -> None:
+    def __init__(
+        self,
+        root: Path,
+        repository: SessionRepository,
+        *,
+        ignored_exclusions: tuple[Path, ...] = (),
+    ) -> None:
         self.root = root
         self.repository = repository
+        self._ignored_exclusions = tuple(path.resolve() for path in ignored_exclusions)
         self._turns: dict[str, int] = {}
         self._pending: dict[str, _PendingMutation] = {}
         self._restoring = False
@@ -56,10 +66,12 @@ class WorkspaceMutations:
         hooks: HookRunner,
         root: Path,
         repository: SessionRepository,
+        *,
+        ignored_exclusions: tuple[Path, ...] = (),
     ) -> WorkspaceMutations:
         recorder = getattr(hooks, "_ness_workspace_mutations", None)
         if recorder is None:
-            recorder = cls(root, repository)
+            recorder = cls(root, repository, ignored_exclusions=ignored_exclusions)
             hooks.register(Hook("preToolUse", handler=recorder.before_tool))
             hooks.register(Hook("postToolUse", handler=recorder.after_tool))
             hooks._ness_workspace_mutations = recorder
@@ -110,6 +122,11 @@ class WorkspaceMutations:
         pending = self._pending[thread_id]
         if before is not None:
             try:
+                if "*" in mutated_paths(tool, payload.get("args") or {}):
+                    pending.before_ignored = ignored_file_fingerprints(
+                        self.root,
+                        excluded_paths=self._ignored_exclusions,
+                    )
                 entries = tree_entries(before, self.root)
                 for raw_path in mutated_paths(tool, payload.get("args") or {}):
                     if raw_path == "*":
@@ -162,6 +179,19 @@ class WorkspaceMutations:
                 str(payload.get("tool")), payload.get("args") or {}
             ):
                 if raw_path == "*":
+                    if pending.before_ignored is None:
+                        raise ValueError("Ignored file inspection is unavailable.")
+                    after_ignored = ignored_file_fingerprints(
+                        self.root,
+                        excluded_paths=self._ignored_exclusions,
+                    )
+                    for path in sorted(
+                        pending.before_ignored.keys() | after_ignored.keys()
+                    ):
+                        if pending.before_ignored.get(path) != after_ignored.get(path):
+                            raise ValueError(
+                                f"Ignored file changed outside Git snapshot coverage: {path}."
+                            )
                     continue
                 path, target = workspace_path(raw_path, self.root)
                 if (target.exists() or target.is_symlink()) and path not in entries:
