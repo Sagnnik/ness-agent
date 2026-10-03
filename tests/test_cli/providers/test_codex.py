@@ -12,6 +12,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
+from ness_agent.compaction import summarize
 from ness_cli.config import ProviderRuntimeConfig
 from ness_cli.providers.codex.adapter import CodexProviderAdapter
 from ness_cli.providers.codex.app_server import CodexAppServer, CodexUnavailable
@@ -147,7 +148,46 @@ def test_responses_payload_preserves_tools_reasoning_history_and_images() -> Non
     assert payload["tool_choice"] == "required"
     assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
     assert payload["prompt_cache_key"] == "thread-key"
-    assert payload["max_output_tokens"] == 99
+    assert "max_output_tokens" not in payload
+    assert "max_tokens" not in payload
+
+
+def test_compaction_omits_unsupported_token_limit_and_preserves_parent_request(
+    monkeypatch,
+) -> None:
+    model = CodexSubscriptionChatModel(
+        model="gpt-test", reasoning_effort="high", prompt_cache_key="thread-key"
+    )
+    bound = model.bind_tool_registry(SimpleNamespace(active_tools=[read_file]))
+    messages = [SystemMessage("stable"), HumanMessage("Fix the build")]
+    parent_payload = bound._payload(messages)
+    calls = []
+
+    async def create(payload):
+        # Model the Codex backend's rejection of output-token limits.
+        if "max_output_tokens" in payload or "max_tokens" in payload:
+            raise RuntimeError("Unsupported parameter: max_output_tokens")
+        calls.append(payload)
+        return {"model": "gpt-test", "output_text": "Build fixed; tests remain."}
+
+    monkeypatch.setattr(model._transport, "create", create)
+    result = asyncio.run(
+        summarize(
+            messages, bound, instruction="Summarize progress", max_output_tokens=4096
+        )
+    )
+
+    assert result == "Build fixed; tests remain."
+    assert len(calls) == 1
+    payload = calls[0]
+    assert payload["input"][:-1] == parent_payload["input"]
+    assert payload["input"][-1] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Summarize progress"}],
+    }
+    assert {key: value for key, value in payload.items() if key != "input"} == {
+        key: value for key, value in parent_payload.items() if key != "input"
+    }
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

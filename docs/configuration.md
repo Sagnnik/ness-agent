@@ -180,7 +180,7 @@ All except `NESS_DIR` are also editable via `/config` in the Ness TUI.
 
 Flags override env for a single run: `--model`, `--reflection-model`, `--api-key`, `--base-url`, `--openrouter-session-id`, `--reasoning-effort`, `--worktree` / `-w`, `--print` / `-p`, and `--yolo`.
 
-`--yolo` is session-only and bypasses approval prompts and persisted permission denials in act mode; hook vetoes and plan-mode read-only rules still apply.
+`--yolo` is session-only and bypasses approval prompts, permission denials, native file-tool project scope, and protected-write checks in act mode. OS permissions, hook vetoes, and plan-mode read-only rules still apply. Normal-mode native file tools ask for approval before accessing outside-project paths. Once approval applies to that call; session and always decisions remember the approved path with separate read/write scope.
 
 Use `/login` for provider authentication and switching. Use `/config` for the
 active provider's model and reasoning settings, behavior, compaction, and

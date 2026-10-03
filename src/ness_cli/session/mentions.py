@@ -17,12 +17,12 @@ def extract_mentions(text: str) -> tuple[str, tuple[str, ...]]:
     return source, tuple(match.group(1) for match in _MENTION_TOKEN.finditer(source))
 
 
-def expand_documents(text: str, permission_store: PermissionStore) -> str:
+def expand_documents(text: str, permission_store: PermissionStore, *, yolo_mode: bool = False) -> str:
     """Prepend one document block per mention while retaining the raw text."""
     source, mentions = extract_mentions(text)
     if not source or not mentions:
         return source
-    blocks = [_render_document(path, permission_store) for path in mentions]
+    blocks = [_render_document(path, permission_store, yolo_mode=yolo_mode) for path in mentions]
     return "\n\n".join((*blocks, source))
 
 
@@ -37,9 +37,9 @@ def _document(path: str, content: str) -> str:
     )
 
 
-def _render_document(path: str, permission_store: PermissionStore) -> str:
+def _render_document(path: str, permission_store: PermissionStore, *, yolo_mode: bool = False) -> str:
     try:
-        resolved = Path(permission_store.validate_path(path))
+        resolved = Path(permission_store.validate_path(path, yolo_mode=yolo_mode))
     except Exception as error:
         return _document(path, f"Error: {error}")
 

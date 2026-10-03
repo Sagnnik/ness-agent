@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -17,6 +19,30 @@ from ness_cli.session.mentions import expand_documents, extract_mentions
 from ness_cli.session.plans import PlanCapture, PlanStore, final_plan_text
 from ness_cli.session.replay import events_to_messages, restore_cost
 from ness_cli.session.rollback import mutated_paths
+from ness_cli.session.coding_session import CodingSession
+
+
+def test_close_cleans_sdk_shell_runtime_even_when_save_fails():
+    coding = object.__new__(CodingSession)
+    coding._closed = False
+    coding._session = SimpleNamespace(close=AsyncMock())
+    coding.finalize_and_save = AsyncMock(side_effect=RuntimeError("save failed"))
+    with pytest.raises(RuntimeError, match="save failed"):
+        asyncio.run(coding.close())
+    coding._session.close.assert_awaited_once()
+    assert coding._closed
+
+
+def test_close_preserves_save_error_when_shell_cleanup_also_fails():
+    coding = object.__new__(CodingSession)
+    coding._closed = False
+    coding._session = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("cleanup failed")))
+    coding.finalize_and_save = AsyncMock(side_effect=RuntimeError("save failed"))
+    with pytest.raises(RuntimeError, match="save failed") as caught:
+        asyncio.run(coding.close())
+    assert caught.value.__notes__ == ["Shell runtime cleanup also failed: cleanup failed"]
+    coding._session.close.assert_awaited_once()
+    assert coding._closed
 
 
 def test_durable_events_copy_input_and_preserve_unknown_kinds():

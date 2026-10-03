@@ -73,6 +73,8 @@ class AgentState(TypedDict, total=False):
     # Set by: approval_gate after user/handler denies tools and used by tools_node 
     # reset at each agent node call after tools_node completes
     approval_declined: dict[str, str]
+    # Canonical filesystem grants valid only for their approved tool call.
+    approval_file_access: dict[str, list[dict]]
     
     # Task list for the thread.
     # Shape: [{id, content, status}] — status: pending | in_progress | completed

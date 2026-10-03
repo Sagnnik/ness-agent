@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import threading
 from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,7 @@ from ness_agent.graph.builder import build_graph
 from ness_agent.graph.helpers import _effective_conversation, _incremental_input_tokens
 from ness_agent.reflection import ReflectionResult
 from ness_agent.session_context import SessionContext, set_session_context, reset_session_context
+from ness_agent.tools.shell_processes import ProcessManager
 from ness_agent.tracing.semconv import (
     AGENT_MODE,
     COST_USD,
@@ -163,6 +167,7 @@ class Session:
         vision: bool | None = None,
         on_plan_turn: PlanTurnHandler | None = None,
         on_interrupt: InterruptHandler | None = None,
+        deadline: float | None = None,
         _config: Any | None = None,
     ):
         """Create a new interaction session bound to a single thread.
@@ -174,6 +179,8 @@ class Session:
             mode: Initial mode (``"act"`` or ``"plan"``).
             metadata: Arbitrary key-value pairs surfaced in the system prompt.
             git_available: Whether the project has a git repo.
+            deadline: Absolute ``time.monotonic()`` timestamp limiting foreground
+                shell commands; this does not impose a timeout on model requests.
             vision: Whether image attachments should be forwarded to the model.
 
                 * ``None`` — caller-built :class:`HumanMessage` content is
@@ -202,8 +209,22 @@ class Session:
         self.thread_id = thread_id
         self.mode = mode
         self.metadata = dict(metadata or {})
+        if deadline is not None and (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+        ):
+            raise ValueError("deadline must be a finite time.monotonic() timestamp")
+        self.deadline = deadline
+        self._shell_cancel_event = threading.Event()
         self.git_available = git_available
         self._cfg = _config or agent.config.fork_for_session()
+        project_root = (self._cfg.options.project_root or Path.cwd()).resolve()
+        ness_dir = (self._cfg.options.ness_dir or project_root / ".ness").resolve()
+        self._shell_process_manager = ProcessManager(
+            project_root=project_root, runtime_root=ness_dir / "runtime" / "shells"
+        )
+        self._closed = False
         self._force_compact = False
         self._pending_act_checkpoint = False
         self._requested_skills: list[str] = []
@@ -274,6 +295,9 @@ class Session:
                 agent_config=cfg,
                 available_skills=self._skill_loader.load(),
                 vision=self._vision,
+                shell_process_manager=self._shell_process_manager,
+                shell_cancel_event=self._shell_cancel_event,
+                shell_deadline=self.deadline,
             )
         )
 
@@ -291,6 +315,12 @@ class Session:
     def app(self):
         """The compiled langgraph application for this session."""
         return self._app
+
+    async def close(self) -> None:
+        """Close this session's shell runtime and stop all owned process groups."""
+        self._closed = True
+        self.cancel()
+        await asyncio.to_thread(self._shell_process_manager.close)
 
     @property
     def config(self):
@@ -354,7 +384,7 @@ class Session:
         self._pending_bootstrap = list(messages)
 
     def cancel(self) -> None:
-        """Request a cooperative break-out of the active turn's stream loop.
+        """Request a cooperative interruption and stop active foreground shells.
 
         ``_iter_events`` polls ``is_cancelled()`` between yields and, on a set
         token, performs partial-state cleanup via
@@ -363,6 +393,7 @@ class Session:
         ``CancelledError`` and is handled by the same finaliser, shielded.
         """
         self._cancel_token.set()
+        self._shell_cancel_event.set()
 
     def is_cancelled(self) -> bool:
         """Whether :meth:`cancel` was requested for the active turn."""
@@ -758,6 +789,7 @@ class Session:
         payload = {
             "messages": [*initial, user_message],
             "approval_declined": {},
+            "approval_file_access": {},
             "mode": self.mode,
             "force_compact": self._consume_force_compact(),
             "requested_skills": skills,
@@ -835,7 +867,7 @@ class Session:
             return out
 
         # handle the on_end_chain event that emits tool_end or the end of tools node
-        if ek == "on_chain_end" and name == "tools":
+        if ek == "on_chain_end" and name in {"tools", "approval_gate"}:
             for msg in _messages_from_event(ev):
                 if getattr(msg, "type", None) != "tool" and not isinstance(msg, ToolMessage):
                     continue
@@ -951,7 +983,11 @@ class Session:
     ) -> AsyncIterator[tuple[SessionEvent, str]]:
         """Yield (event, assistant_text_so_far) pairs from the graph stream."""
 
+        if self._closed:
+            raise RuntimeError("Session is closed.")
+
         # sets up a runtime context for this session
+        self._shell_cancel_event = threading.Event()
         ctx_token = self._install_session_runtime()
         # reset per-turn usage (last call + turn aggregate)
         self._last_usage = None
@@ -1043,6 +1079,7 @@ class Session:
                     for queued in self._drain_queue():
                         yield queued, assistant_text
                 except asyncio.CancelledError:
+                    self.cancel()
                     # Hard-escalation path: the cooperative cancel token failed
                     # to break the stream loop within the backstop window.
                     # Best-effort finalisation before re-raising so the task is
@@ -1088,6 +1125,9 @@ class Session:
                         else:
                             yield SessionEvent("plan_turn", {"text": assistant_text}), assistant_text
             finally:
+                # A stream abandoned by its consumer must also stop foreground
+                # worker threads. Each turn has its own event, never reset.
+                self._shell_cancel_event.set()
                 # Restore the session mode when a one-turn override was applied
                 # (see ``mode`` kwarg docstring). Direct assignment avoids
                 # ``set_mode``'s plan->act checkpoint side effect.
@@ -1168,11 +1208,12 @@ class Session:
             active_skills: Compatibility spelling, used when requested_skills is omitted.
             mode: Override the session mode for this turn only.
         """
-        async for event, _ in self._iter_events(
+        async with aclosing(self._iter_events(
             message, images=images,
             requested_skills=requested_skills if requested_skills is not None else active_skills,
             mode=mode,
-        ):
-            yield event
+        )) as events:
+            async for event, _ in events:
+                yield event
         self.turn_count += 1
         await self.refresh_context_snapshot()

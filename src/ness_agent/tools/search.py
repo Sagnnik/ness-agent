@@ -37,8 +37,14 @@ def grep(
         if file_filter == "":
             file_filter = None
         rt = get_session_context()
-        abs_path = rt.permissions.validate_path(path)
-        if shutil.which("rg"):
+        target = rt.permissions.resolve_path(path)
+        abs_path = rt.permissions.validate_path(
+            path, yolo_mode=rt.options.yolo_mode, recursive=target.is_dir(),
+        )
+        # Validate individual files during external directory searches so a
+        # remembered denial of one child still wins over a directory grant.
+        external_tree = target.is_dir() and not target.is_relative_to(rt.project_root)
+        if shutil.which("rg") and (rt.options.yolo_mode or not external_tree):
             cmd = ["rg", "-n", "--no-heading"]
             if file_filter:
                 cmd.extend(["-g", file_filter])
@@ -63,7 +69,9 @@ def _python_grep(pattern: str, path: str, glob: str | None) -> str:
     rt = get_session_context()
     rx = re.compile(pattern)
     matches = []
-    for root, dirs, files in os.walk(path):
+    target = Path(path)
+    entries = [(str(target.parent), [], [target.name])] if target.is_file() else os.walk(path)
+    for root, dirs, files in entries:
         dirs[:] = [d for d in dirs if not is_ignored_dir(d)]
         for filename in files:
             fp = os.path.join(root, filename)
@@ -71,6 +79,7 @@ def _python_grep(pattern: str, path: str, glob: str | None) -> str:
             if glob and not _matches_glob(rel, glob):
                 continue
             try:
+                rt.permissions.validate_path(fp, yolo_mode=rt.options.yolo_mode)
                 with open(fp, "r", encoding="utf-8") as handle:
                     for line_no, line in enumerate(handle, 1):
                         if rx.search(line):

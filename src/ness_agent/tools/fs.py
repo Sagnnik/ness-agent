@@ -25,12 +25,16 @@ READ_FILE_MAX_BYTES = 50 * 1024 * 1024
 PROTECTED_WRITE_DIRS = frozenset({".git", ".ness"})
 
 
-def _validate_path(path: str) -> str:
-    return get_session_context().permissions.validate_path(path)
+def _validate_path(path: str, *, write: bool = False, recursive: bool = False) -> str:
+    ctx = get_session_context()
+    return ctx.permissions.validate_path(
+        path, write=write, yolo_mode=ctx.options.yolo_mode, recursive=recursive,
+    )
 
 
 def _relative_to_root(path: str) -> str:
-    return get_session_context().permissions.relative_to_root(path)
+    ctx = get_session_context()
+    return ctx.permissions.relative_to_root(path, write=True, yolo_mode=ctx.options.yolo_mode)
 
 
 def _project_root() -> Path:
@@ -140,7 +144,7 @@ def is_protected_write_path(path: str) -> bool:
 
 
 def _reject_protected_write(rel_path: str, action: str) -> str | None:
-    if is_protected_write_path(rel_path):
+    if not get_session_context().options.yolo_mode and is_protected_write_path(rel_path):
         return f"Error: refusing to {action} protected path {rel_path}"
     return None
 
@@ -157,7 +161,7 @@ def delete(paths: list[str]) -> str:
     errors: list[str] = []
     for path in paths:
         try:
-            abs_path = _validate_path(path)
+            abs_path = _validate_path(path, write=True)
             rel = _relative_to_root(abs_path)
             if error := _reject_protected_write(rel, "delete"):
                 errors.append(error.removeprefix("Error: "))
@@ -191,7 +195,7 @@ def delete(paths: list[str]) -> str:
 def write(path: str, content: str) -> str:
     """Write a file to the local filesystem."""
     try:
-        abs_path = _validate_path(path)
+        abs_path = _validate_path(path, write=True)
         rel = _relative_to_root(abs_path)
         if error := _reject_protected_write(rel, "write"):
             return error
@@ -230,7 +234,7 @@ def edit(
     specific old_string if the wrong region was matched.
     """
     try:
-        abs_path = _validate_path(path)
+        abs_path = _validate_path(path, write=True)
         rel = _relative_to_root(abs_path)
         if error := _reject_protected_write(rel, "edit"):
             return error
@@ -267,15 +271,26 @@ def edit(
 
 
 @tool
-def glob(pattern: str) -> str:
-    """Find files matching a glob pattern."""
+def glob(pattern: str, path: str = ".") -> str:
+    """Find files matching a glob pattern under path, defaulting to the project."""
     try:
         if not pattern:
             return "Error: pattern is empty. Provide a glob pattern to match files."
-        matches = _git_glob(pattern) if is_git_repo(str(_project_root())) else []
+        root = Path(_validate_path(path, recursive=True))
+        matches = _git_glob(pattern, root=root) if is_git_repo(str(root)) else []
         if not matches:
-            matches = _filesystem_glob(pattern)
-        return "\n".join(sorted(matches)[:300]) or "No matches"
+            matches = _filesystem_glob(pattern, root=root)
+        allowed = []
+        for match in matches:
+            try:
+                resolved = Path(_validate_path(str(root / match)))
+            except (PermissionError, ValueError):
+                continue
+            if resolved.is_relative_to(_project_root()):
+                allowed.append(str(resolved.relative_to(_project_root())))
+            else:
+                allowed.append(str(resolved))
+        return "\n".join(sorted(allowed)[:300]) or "No matches"
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -428,18 +443,18 @@ def is_git_repo(path: str = ".") -> bool:
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
-def _filesystem_glob(pattern: str) -> list[str]:
-    root = _project_root()
+def _filesystem_glob(pattern: str, *, root: Path | None = None) -> list[str]:
+    root = root or _project_root()
     return [str(p.relative_to(root)) for p in root.glob(pattern) if p.is_file()]
 
 
-def _git_glob(pattern: str) -> list[str]:
+def _git_glob(pattern: str, *, root: Path | None = None) -> list[str]:
     # git ls-files is a lot faster than the filesystem glob
     # if the repo is not a git repo then fallback to the filesystem glob
     try:
         result = subprocess.run(
             ["git", "ls-files"],
-            cwd=_project_root(),
+            cwd=root or _project_root(),
             capture_output=True,
             text=True,
             timeout=10,

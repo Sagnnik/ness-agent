@@ -28,6 +28,9 @@ from ness_agent.memory import MemoryStore
 from ness_agent.options import MemoryConfig, NessAgentOptions
 from ness_agent.persistence import ThreadStore
 from ness_agent.reflection import run_reflection_gate
+from ness_agent.session_context import get_session_context, reset_session_context
+from ness_agent.tools.shell import shell
+from ness_agent.tools.shell_processes import _process_group_alive
 from ness_agent.tracing.cost import CostTracker
 
 
@@ -75,6 +78,44 @@ def test_sessions_fork_mutable_config_and_share_project_services(tmp_path: Path)
     assert first.config.memory_store is second.config.memory_store is agent.config.memory_store
     assert first.config.hook_runner is second.config.hook_runner is agent.config.hook_runner
     assert first.config.tracer is second.config.tracer is agent.config.tracer
+
+
+def test_session_shell_runtime_survives_turn_contexts_and_closes_owned_jobs(tmp_path):
+    project = tmp_path / "app"
+    project.mkdir()
+    agent = _agent(project)
+    agent.config.options.ness_dir = tmp_path / "logs" / "agent" / "ness"
+    first = agent.session(thread_id="shell-one")
+    second = agent.session(thread_id="shell-two")
+    try:
+        token = first._install_session_runtime()
+        try:
+            manager = get_session_context().get_shell_process_manager()
+            job = manager.start("sleep 30")
+        finally:
+            reset_session_context(token)
+        token = second._install_session_runtime()
+        try:
+            assert "No shell jobs" in shell.invoke({"action": "jobs"})
+            assert "Unknown shell job" in shell.invoke({
+                "action": "kill", "job_id": job["job_id"]
+            })
+        finally:
+            reset_session_context(token)
+        token = first._install_session_runtime()
+        try:
+            assert get_session_context().get_shell_process_manager() is manager
+            assert job["job_id"] in shell.invoke({"action": "jobs"})
+        finally:
+            reset_session_context(token)
+        asyncio.run(first.close())
+        assert not _process_group_alive(job["pgid"])
+        asyncio.run(first.close())
+        with pytest.raises(RuntimeError, match="closed"):
+            asyncio.run(first.run("another turn"))
+    finally:
+        asyncio.run(first.close())
+        asyncio.run(second.close())
 
 
 def test_session_cost_is_local_and_live_usage_rolls_up_once(tmp_path: Path):

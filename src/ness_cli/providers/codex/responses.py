@@ -169,9 +169,6 @@ class CodexSubscriptionChatModel(BaseChatModel):
     def _payload(
         self, messages: Sequence[BaseMessage], **kwargs: Any
     ) -> dict[str, Any]:
-        # Takes those converted messages and builds the final request body.
-        # It adds model name, instructions, conversation input, tool definitions, tool choice, reasoning effort, and max output tokens.
-        # This is basically the last formatting step before the HTTP/transport layer.
         instructions, items = self._input(messages)
         supplied = kwargs.pop("tools", None)
         tools = self._tool_snapshot or [
@@ -200,9 +197,8 @@ class CodexSubscriptionChatModel(BaseChatModel):
             payload["tool_choice"] = "required" if tool_choice == "any" else tool_choice
         if self.reasoning_effort and self.reasoning_effort != "none":
             payload["reasoning"] = {"effort": self.reasoning_effort, "summary": "auto"}
-        max_tokens = kwargs.pop("max_tokens", None)
-        if max_tokens is not None:
-            payload["max_output_tokens"] = int(max_tokens)
+        # The Codex subscription endpoint rejects output-token limits. Generic
+        # SDK callers, including compaction, may pass them; omit them here.
         return payload
 
     @staticmethod

@@ -90,7 +90,11 @@ def installed_session_context(
     try:
         yield ctx
     finally:
-        reset_session_context(token)
+        try:
+            if ctx.shell_process_manager is not None:
+                ctx.shell_process_manager.close()
+        finally:
+            reset_session_context(token)
 
 
 def set_exa_key(ctx: SessionContext, key: str | None) -> None:
@@ -112,4 +116,8 @@ class SessionContextTestMixin:
         return self.ctx
 
     def uninstall_ctx(self) -> None:
-        reset_session_context(self._ctx_token)
+        try:
+            if self.ctx.shell_process_manager is not None:
+                self.ctx.shell_process_manager.close()
+        finally:
+            reset_session_context(self._ctx_token)

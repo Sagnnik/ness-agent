@@ -16,7 +16,7 @@ from ness_agent import (
 )
 
 
-def auto_answer_question(questions: list[dict]) -> list[dict]:
+async def auto_answer_question(questions: list[dict]) -> list[dict]:
     answers: list[dict] = []
 
     for index, question in enumerate(questions, start=1):

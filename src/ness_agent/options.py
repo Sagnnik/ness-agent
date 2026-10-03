@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,14 +22,27 @@ class NessAgentOptions:
     exa_api_key: str | None = None
     project_root: Path | None = None
     ness_dir: Path | None = None
+    shell_default_timeout: float = 30.0
+    shell_max_timeout: float | None = None
     # AIMessage cap text injected on a pure-LLM cancel with no partial text or
     # pending tool calls, so the model does not silently resume the abandoned
     # request next turn
     interruption_marker: str = ("… [turn interrupted by user] ")
     # LangGraph recursion_limit for Session.run / Session.stream turns.
-    recursion_limit: int = 75
+    recursion_limit: int = 500
 
     def __post_init__(self) -> None:
+        for name in ("shell_default_timeout", "shell_max_timeout"):
+            value = getattr(self, name)
+            if value is None and name == "shell_max_timeout":
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive finite number")
         if self.context_window is not None and self.context_window <= 0:
             raise ValueError("context_window must be positive when set")
         if self.compaction_token_budget <= 0:

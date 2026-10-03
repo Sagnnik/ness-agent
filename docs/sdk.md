@@ -46,9 +46,12 @@ async def main() -> None:
     )
     session = agent.session(thread_id="proj-1")
     # session.toggle_mode() flips plan ↔ act
-    result = await session.run("Plan then implement: add a rate limiter on /api/login")
-    print(result.assistant_message)
-    print(result.usage_total)  # aggregate of every model call in the turn
+    try:
+        result = await session.run("Plan then implement: add a rate limiter on /api/login")
+        print(result.assistant_message)
+        print(result.usage_total)  # aggregate of every model call in the turn
+    finally:
+        await session.close()  # stop any background shell jobs owned by this session
 
 
 asyncio.run(main())
@@ -369,3 +372,20 @@ See `tests/tracing/` for integration examples.
 ## Stability
 
 Ness Agent is **0.x experimental**. Public APIs may change until 1.0. Pin versions in production and watch [CHANGELOG](../CHANGELOG.md).
+
+### Shell execution and outside-project access
+
+Configure shell limits through SDK options:
+
+```python
+options = NessAgentOptions(
+    project_root=Path("/app"),
+    ness_dir=Path("/logs/agent/ness"),
+    shell_default_timeout=30,
+    shell_max_timeout=1800,
+)
+```
+
+Normal-mode file tools ask for approval before reading or writing outside the project. The existing once, session, and always decisions control how long the path grant lasts. Read approval does not grant writes. Configure an approval handler for interactive grants; without one, outside access is denied. YOLO bypasses file-path and protected-write restrictions as well as tool approvals and deny rules. OS permissions still apply. Neither mode sandboxes shell commands; use OS or container isolation for that.
+
+Foreground commands return a retained log path and execution ID. The agent can retrieve the full log with `shell(action="read", job_id=..., offset=0)` and continue using the returned `next_offset`. Cancelling the session stops active foreground process groups. For a host deadline, pass `deadline=time.monotonic() + remaining_seconds` when creating the session; the host still owns the overall task timeout and session cleanup.

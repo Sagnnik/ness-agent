@@ -460,6 +460,7 @@ class NessAgent:
         on_interrupt: "InterruptHandler | None" = None,
         model: BaseChatModel | None = None,
         reflection_model: BaseChatModel | None | object = _UNSET,
+        deadline: float | None = None,
     ) -> Session:
         """Create a runnable :class:`~ness_agent.session.Session` for one thread.
 
@@ -491,6 +492,9 @@ class NessAgent:
             Optional effective-model overrides applied to this session's
             config fork before its graph is compiled. Omitting either inherits
             the corresponding agent default.
+        deadline : float, optional
+            Absolute ``time.monotonic()`` timestamp limiting foreground shell
+            execution. The host remains responsible for its overall task deadline.
         """
         from ness_agent.session import Session
 
@@ -509,6 +513,7 @@ class NessAgent:
             vision=vision,
             on_plan_turn=on_plan_turn,
             on_interrupt=on_interrupt,
+            deadline=deadline,
             _config=cfg,
         )
 

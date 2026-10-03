@@ -132,7 +132,7 @@ def run(
     yolo: bool = typer.Option(
         False,
         "--yolo",
-        help="Approve all act-mode tool calls and ignore permission deny rules",
+        help="Bypass act-mode approvals, deny rules, and native file-path restrictions",
     ),
     print_mode: bool = typer.Option(
         False,

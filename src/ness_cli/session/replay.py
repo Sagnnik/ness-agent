@@ -38,6 +38,7 @@ def events_to_messages(
     subagents: Sequence[Mapping[str, Any]] = (),
     vision: bool | None = None,
     permission_store: PermissionStore | None = None,
+    yolo_mode: bool = False,
 ) -> list[BaseMessage]:
     """Replay the latest compaction checkpoint and its raw suffix."""
     rows = [dict(event) for event in events]
@@ -80,7 +81,7 @@ def events_to_messages(
         if kind == "user":
             text = str(event.get("content") or "")
             if permission_store is not None:
-                text = expand_documents(text, permission_store)
+                text = expand_documents(text, permission_store, yolo_mode=yolo_mode)
             images = list(event.get("images") or ())
             if images and vision is not False:
                 content: list[dict[str, Any]] = [

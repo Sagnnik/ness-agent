@@ -220,6 +220,9 @@ class CodingSession:
             subagents=self._repository.subagents(self.thread_id),
             vision=self._vision,
             permission_store=self._session.config.permission_store,
+            yolo_mode=bool(getattr(
+                getattr(self._session.config, "options", None), "yolo_mode", False,
+            )),
         )
         if replay_cost and not self._cost_restored:
             restore_cost(rows, self._session.cost_tracker)
@@ -503,7 +506,18 @@ class CodingSession:
     async def close(self) -> None:
         if self._closed:
             return
+        save_error = None
         try:
             await self.finalize_and_save()
+        except BaseException as exc:
+            save_error = exc
+            raise
         finally:
-            self._closed = True
+            try:
+                await self._session.close()
+            except BaseException as exc:
+                if save_error is None:
+                    raise
+                save_error.add_note(f"Shell runtime cleanup also failed: {exc}")
+            finally:
+                self._closed = True

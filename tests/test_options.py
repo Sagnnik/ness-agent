@@ -9,7 +9,7 @@ def test_ness_agent_options_defaults_are_valid():
     opts = NessAgentOptions()
     assert opts.compaction_token_budget == 120_000
     assert opts.reflection_token_ratio == 0.0
-    assert opts.recursion_limit == 75
+    assert opts.recursion_limit == 500
 
 
 @pytest.mark.parametrize(
@@ -31,6 +31,12 @@ def test_ness_agent_options_defaults_are_valid():
         ({"reflection_token_ratio": -0.1}, "reflection_token_ratio must be between 0 and 1"),
         ({"reflection_token_ratio": 1.1}, "reflection_token_ratio must be between 0 and 1"),
         ({"recursion_limit": 0}, "recursion_limit must be at least 1"),
+        ({"shell_default_timeout": 0}, "shell_default_timeout"),
+        ({"shell_default_timeout": None}, "shell_default_timeout"),
+        ({"shell_default_timeout": float("nan")}, "shell_default_timeout"),
+        ({"shell_max_timeout": -1}, "shell_max_timeout"),
+        ({"shell_max_timeout": float("inf")}, "shell_max_timeout"),
+        ({"shell_max_timeout": True}, "shell_max_timeout"),
     ],
 )
 def test_ness_agent_options_rejects_invalid_values(kwargs, match: str):
@@ -44,6 +50,8 @@ def test_ness_agent_options_rejects_invalid_values(kwargs, match: str):
         {"reflection_token_ratio": 0.0},
         {"reflection_token_ratio": 1.0},
         {"recursion_limit": 1},
+        {"shell_default_timeout": 0.1, "shell_max_timeout": None},
+        {"shell_default_timeout": 900, "shell_max_timeout": 1200},
         {"context_window": None, "compaction_token_budget": 50_000},
     ],
 )

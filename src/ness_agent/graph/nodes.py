@@ -499,6 +499,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         updates: AgentState = {
             "messages": [],
             "approval_declined": {},
+            "approval_file_access": {},
             "force_compact": False,
             "requested_skills": [],
             "skill_catalog": "",
@@ -600,20 +601,38 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
     async def approval_gate(state: AgentState) -> AgentState:
         """The approval gate node that handles the approval logic."""
         calls = extract_tool_calls(state["messages"][-1])
-        gated = [(n, a, cid) for n, a, cid in calls if _needs_approval(n, a, options, permission_store, tools_reg)]
+        readonly = (state.get("mode") or rt.resolved_mode).lower() == "plan" and (
+            config.modes is None or config.modes.plan_mode_readonly
+        )
+        gated = [
+            (n, a, cid) for n, a, cid in calls
+            if not (readonly and not tools_reg.is_read_only(n, a))
+            and _needs_approval(n, a, options, permission_store, tools_reg)
+        ]
 
         if not gated:
-            return {"approval_declined": {}}
+            return {"approval_declined": {}, "approval_file_access": {}}
 
         ah = config.approval_handler
         denials: dict[str, str] = {}
+        approved: dict[str, list[dict]] = {}
         for name, args, call_id in gated:
             if ah is None:
                 persist.append_event(thread_id, {"kind": "approval", "tool": name, "decision": "no"})
                 denials[call_id] = f"Approval required but no handler configured: {name}"
                 continue
 
-            decision = await ah(name, args)
+            access = permission_store.file_access_requests(name, args)
+            prompt_args = dict(args)
+            if access:
+                prompt_args["filesystem_access"] = access
+            decision = await ah(name, prompt_args)
+            if decision in {"yes", "session", "always"}:
+                approved[call_id] = access
+                if decision != "yes":
+                    permission_store.remember_file_access(access, allow=True, scope=decision)
+            elif decision == "never":
+                permission_store.remember_file_access(access, allow=False, scope="always")
 
             if decision == "always":
                 rule = permission_store.default_rule_for(name, args)
@@ -652,11 +671,15 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             persist.append_event(thread_id, {"kind": "approval", "tool": name, "decision": "no"})
             denials[call_id] = f"Denied by user approval: {name}"
 
-        updates: AgentState = {"approval_declined": denials}
+        updates: AgentState = {"approval_declined": denials, "approval_file_access": approved}
         # When every tool_call in the batch is denied, emit ToolMessages here and
         # skip tools_node. Partial denials are left for tools_node so siblings run.
         if _all_calls_denied(calls, denials):
             updates["messages"] = _denial_tool_messages(calls, denials)
+            for name, args, call_id in calls:
+                persist.append_event(thread_id, _tool_event(
+                    name, args, denials[call_id], 0, call_id=call_id, exit_status="denied",
+                ))
         return updates
 
     async def tools_node(state: AgentState) -> AgentState:
@@ -664,7 +687,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
         # get the last AIMessage and extract the tool calls
         calls = extract_tool_calls(state["messages"][-1])
         if not calls:
-            return {"messages": [], "approval_declined": {}}
+            return {"messages": [], "approval_declined": {}, "approval_file_access": {}}
 
         set_subagent_runtime(main_model, thread_id)
         set_question_runtime(config.question_handler)
@@ -760,15 +783,17 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
                     # Canonical JSON form parsed by Langfuse/Arize as tool input.
                     tool_span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, json.dumps(args, default=str))
                 try:
-                    if tmap is None:
-                        result = f"Error: unknown tool {name}"
-                        tool_span.set_attribute(TOOL_EXIT_STATUS, "unknown_tool")
-                    elif getattr(tmap, "is_async", False) or getattr(tmap, "coroutine", None) is not None:
-                        result = await tmap.ainvoke(args)
-                        tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
-                    else:
-                        result = await asyncio.to_thread(tmap.invoke, args)
-                        tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
+                    grants = (state.get("approval_file_access") or {}).get(call_id, [])
+                    with permission_store.file_access(grants):
+                        if tmap is None:
+                            result = f"Error: unknown tool {name}"
+                            tool_span.set_attribute(TOOL_EXIT_STATUS, "unknown_tool")
+                        elif getattr(tmap, "is_async", False) or getattr(tmap, "coroutine", None) is not None:
+                            result = await tmap.ainvoke(args)
+                            tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
+                        else:
+                            result = await asyncio.to_thread(tmap.invoke, args)
+                            tool_span.set_attribute(TOOL_EXIT_STATUS, "ok")
                     tool_span.set_attribute(TOOL_ERROR, False)
                 except Exception as exc:
                     tool_span.record_exception(exc)
@@ -820,6 +845,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             "messages": results,
             "todos": get_thread_todos(thread_id),
             "approval_declined": {},
+            "approval_file_access": {},
         }
 
     async def route_after_agent(state) -> Literal["approval_gate", "tools", "__end__"]:
@@ -830,17 +856,15 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
 
         cur = (state.get("mode") or rt.resolved_mode).lower()
 
-        # Plan-mode mutating tools skip the approval gate (still denied in tools_node
-        # when plan_mode_readonly is on).
-        readonly = (
-            True if config.modes is None else bool(config.modes.plan_mode_readonly)
+        # Plan-mode writes remain gated, while independent external reads can
+        # still ask for approval in a mixed tool batch.
+        readonly = cur == "plan" and (
+            config.modes is None or config.modes.plan_mode_readonly
         )
-        if (
-            cur == "plan"
-            and readonly
-            and any(not tools_reg.is_read_only(n, a) for n, a, _ in calls)
-        ):
-            return "tools"
+        eligible = [
+            (n, a) for n, a, _ in calls
+            if not (readonly and not tools_reg.is_read_only(n, a))
+        ]
 
         # if the approval is enabled and the tool needs approval then return the approval gate node
         if (
@@ -848,7 +872,7 @@ def make_nodes(config, *, thread_id, mode = "act", git_available = None, metadat
             and not getattr(options, "yolo_mode", False)
             and any(
                 _needs_approval(n, a, options, permission_store, tools_reg)
-                for n, a, _ in calls
+                for n, a in eligible
             )
         ):
             return "approval_gate"

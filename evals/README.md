@@ -65,6 +65,19 @@ The release wheel verified for this snapshot is
 `ness_agent-0.2.4-py3-none-any.whl`, SHA-256
 `feb1fe05cdcd765f040cfd5ee5d4f358597d93ef8d4af8e0c7546e6d6196c121`.
 
+[The failed-or-errored rerun config](configs/tb-failed-or-errored-codex.yaml)
+selects 44 unique tasks from the recorded September 28 nine-job sweep. It
+includes every task with a reward-zero attempt, an unscored attempt, or a trial
+exception, including exceptions on reward-one attempts. The selection covers
+82 historical attempts: 63 reward-zero, 13 unscored, and six reward-one with
+errors. It schedules three fresh attempts per task, 132 trials total, with the
+original model, concurrency, and immutable dataset revision.
+
+This config selects tasks; it does not upgrade the installed Ness package.
+Before using it to measure branch fixes, prepare the compatible adapter snapshot
+and updated package pin described above. Its current agent path still installs
+the historical `0.2.4` release.
+
 Codex subscription runs attach an API-equivalent cost estimate to each usage
 event. The standard short-context rates (USD per 1M tokens) are:
 

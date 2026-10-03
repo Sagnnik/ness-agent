@@ -97,7 +97,11 @@ class TurnRunner:
             )
             user_seq = self._repository.append_user(thread_id, message, images=images)
             self._rollback.save(thread_id, user_seq, checkpoint)
-            expanded = expand_documents(message, self._permission_store)
+            config = getattr(self._session, "config", None)
+            expanded = expand_documents(
+                message, self._permission_store,
+                yolo_mode=bool(getattr(getattr(config, "options", None), "yolo_mode", False)),
+            )
 
             async for event in self._session.stream(
                 expanded,
